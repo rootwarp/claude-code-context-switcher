@@ -1,0 +1,38 @@
+version: 1
+contexts:
+  personal:
+    name: personal
+    auth_mode: oauth
+    identity:
+      user_id: "f3a9abc"
+      account_uuid: "8c2edef"
+      email_hint: "a***@example.com"
+    fingerprint: "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: claude_code_keychain
+  work:
+    name: work
+    auth_mode:
+      api_key:
+        base_url: null
+    identity:
+      label: "Work API key"
+    fingerprint: "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: plaintext
+      value: "sk-ant-work-key"
+  console-key:
+    name: console-key
+    auth_mode:
+      api_key:
+        base_url: null
+    identity:
+      label: "Console key (personal)"
+    fingerprint: "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: keychain
+      service: "cctx-context-console-key"
+      account: "joonkyo"
