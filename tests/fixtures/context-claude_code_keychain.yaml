@@ -1,0 +1,10 @@
+name: personal
+auth_mode: !oauth
+identity:
+  user_id: "f3a9abc000000000000000000000000000000000000000000000000000000001"
+  account_uuid: "8c2edef000000000000000000000000000000000000000000000000000000002"
+  email_hint: "a***@example.com"
+fingerprint: "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b"
+created_at: "2026-04-18T02:14:05Z"
+secret_ref:
+  kind: claude_code_keychain

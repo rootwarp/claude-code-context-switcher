@@ -1,0 +1,10 @@
+name: bootstrap-demo
+auth_mode: !api_key
+  base_url: null
+identity:
+  label: "Demo (plaintext — do not use in prod)"
+fingerprint: "0000000000000000000000000000000000000000000000000000000000000000"
+created_at: "2026-04-18T02:30:00Z"
+secret_ref:
+  kind: plaintext
+  value: "sk-ant-demo-key"
