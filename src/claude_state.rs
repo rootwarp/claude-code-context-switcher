@@ -172,6 +172,7 @@ pub fn save_settings_env(
 }
 
 #[cfg(test)]
+#[allow(clippy::similar_names)] // `path`/`patch` are intentional distinct names in test helpers
 mod tests {
     use super::*;
     use std::fs;
@@ -347,35 +348,32 @@ mod tests {
         );
     }
 
-    // ── test 9 ──────────────────────────────────────────────────────────────
+    // ── tests 9 + 10: resolve_claude_dir (sequential to avoid env-var race) ──
     #[test]
-    fn resolve_claude_dir_uses_env_override() {
+    fn resolve_claude_dir_env_override_and_default() {
+        const KEY: &str = "CLAUDE_CONFIG_DIR";
         let dir = TempDir::new().unwrap();
         let expected = dir.path().to_path_buf();
 
-        let key = "CLAUDE_CONFIG_DIR";
-        let prev = std::env::var_os(key);
-        std::env::set_var(key, &expected);
-        let result = resolve_claude_dir().unwrap();
+        // -- test 9: env override --
+        let prev = std::env::var_os(KEY);
+        std::env::set_var(KEY, &expected);
+        let with_override = resolve_claude_dir().unwrap();
+        // restore before assertion so default test runs correctly
         match prev {
-            Some(v) => std::env::set_var(key, v),
-            None => std::env::remove_var(key),
+            Some(v) => std::env::set_var(KEY, v),
+            None => std::env::remove_var(KEY),
         }
+        assert_eq!(with_override, expected);
 
-        assert_eq!(result, expected);
-    }
-
-    // ── test 10 ─────────────────────────────────────────────────────────────
-    #[test]
-    fn resolve_claude_dir_default_is_home_claude() {
-        if std::env::var_os("CLAUDE_CONFIG_DIR").is_some() {
-            return;
+        // -- test 10: default (only when KEY is unset) --
+        if std::env::var_os(KEY).is_none() {
+            let default = resolve_claude_dir().unwrap();
+            assert!(
+                default.to_string_lossy().ends_with("/.claude"),
+                "expected path ending in /.claude, got: {}",
+                default.display()
+            );
         }
-        let result = resolve_claude_dir().unwrap();
-        assert!(
-            result.to_string_lossy().ends_with("/.claude"),
-            "expected path ending in /.claude, got: {}",
-            result.display()
-        );
     }
 }
