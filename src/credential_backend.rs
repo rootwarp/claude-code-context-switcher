@@ -113,7 +113,7 @@ pub struct ItemHandle {
 }
 
 /// Errors that a [`CredentialBackend`] implementation can return.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum BackendError {
     #[error("keychain item not found")]
     NotFound,
@@ -124,9 +124,15 @@ pub enum BackendError {
     #[error("verify mismatch — written value differs from expected")]
     VerifyMismatch,
     #[error("I/O error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::sync::Arc<std::io::Error>),
     #[error("platform error: {0}")]
     Platform(String),
+}
+
+impl From<std::io::Error> for BackendError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(std::sync::Arc::new(e))
+    }
 }
 
 // ─── InMemoryBackend ─────────────────────────────────────────────────────────
@@ -226,6 +232,125 @@ impl CredentialBackend for InMemoryBackend {
         };
         out.sort_by(|a, b| (&a.service, &a.account).cmp(&(&b.service, &b.account)));
         Ok(out)
+    }
+}
+
+// ─── FaultInjectingBackend ────────────────────────────────────────────────────
+
+/// Which method on a [`CredentialBackend`] should be instrumented for fault injection.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FaultMethod {
+    Get,
+    Set,
+    Delete,
+    Enumerate,
+    Verify,
+}
+
+/// Wraps any [`CredentialBackend`] and forces the N-th call to a specified method to fail.
+///
+/// `fail_on_nth_call` is 1-indexed. Zero means never fail. The injected `error` is
+/// returned on the triggering call; all other calls are forwarded to `inner`.
+///
+/// Use this in tests to exercise the rollback path of the switch engine without needing
+/// platform keychain access.
+pub struct FaultInjectingBackend<'a> {
+    inner: &'a dyn CredentialBackend,
+    method: FaultMethod,
+    fail_on_nth_call: std::sync::atomic::AtomicUsize,
+    calls: std::sync::atomic::AtomicUsize,
+    error: BackendError,
+}
+
+impl<'a> FaultInjectingBackend<'a> {
+    /// Create a new fault-injecting wrapper.
+    ///
+    /// `fail_on_nth_call`: 1-indexed call number that will return `error`; 0 disables injection.
+    #[must_use]
+    pub fn new(
+        inner: &'a dyn CredentialBackend,
+        method: FaultMethod,
+        fail_on_nth_call: usize,
+        error: BackendError,
+    ) -> Self {
+        Self {
+            inner,
+            method,
+            fail_on_nth_call: std::sync::atomic::AtomicUsize::new(fail_on_nth_call),
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            error,
+        }
+    }
+
+    fn maybe_fail(&self, called_method: FaultMethod) -> Option<BackendError> {
+        if self.method != called_method {
+            return None;
+        }
+        let n = self
+            .calls
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1;
+        let trigger = self
+            .fail_on_nth_call
+            .load(std::sync::atomic::Ordering::Relaxed);
+        if trigger > 0 && n == trigger {
+            Some(self.error.clone())
+        } else {
+            None
+        }
+    }
+}
+
+impl CredentialBackend for FaultInjectingBackend<'_> {
+    fn get_generic_password(
+        &self,
+        service: &str,
+        account: &str,
+    ) -> Result<Secret<Vec<u8>>, BackendError> {
+        if let Some(e) = self.maybe_fail(FaultMethod::Get) {
+            return Err(e);
+        }
+        self.inner.get_generic_password(service, account)
+    }
+
+    fn set_generic_password(
+        &self,
+        service: &str,
+        account: &str,
+        password: &[u8],
+        opts: PasswordOptions,
+    ) -> Result<(), BackendError> {
+        if let Some(e) = self.maybe_fail(FaultMethod::Set) {
+            return Err(e);
+        }
+        self.inner
+            .set_generic_password(service, account, password, opts)
+    }
+
+    fn delete_generic_password(&self, service: &str, account: &str) -> Result<(), BackendError> {
+        if let Some(e) = self.maybe_fail(FaultMethod::Delete) {
+            return Err(e);
+        }
+        self.inner.delete_generic_password(service, account)
+    }
+
+    fn enumerate_by_service_prefix(&self, prefix: &str) -> Result<Vec<ItemHandle>, BackendError> {
+        if let Some(e) = self.maybe_fail(FaultMethod::Enumerate) {
+            return Err(e);
+        }
+        self.inner.enumerate_by_service_prefix(prefix)
+    }
+
+    fn verify_password(
+        &self,
+        service: &str,
+        account: &str,
+        expected: &[u8],
+    ) -> Result<(), BackendError> {
+        if let Some(e) = self.maybe_fail(FaultMethod::Verify) {
+            return Err(e);
+        }
+        self.inner.verify_password(service, account, expected)
     }
 }
 
@@ -382,6 +507,58 @@ mod tests {
                 .get_generic_password("svc", &format!("acc-{i}"))
                 .unwrap();
             assert_eq!(v.expose().as_slice(), &[i]);
+        }
+    }
+
+    // ── FaultInjectingBackend unit tests ──────────────────────────────────────
+
+    #[test]
+    fn fault_injecting_backend_passes_through_by_default() {
+        let inner = InMemoryBackend::new();
+        inner
+            .set_generic_password("svc", "acc", b"secret", default_opts())
+            .unwrap();
+        // fail_on_nth=0 → never fail
+        let fib =
+            FaultInjectingBackend::new(&inner, FaultMethod::Get, 0, BackendError::AccessDenied);
+        for _ in 0..5 {
+            let v = fib.get_generic_password("svc", "acc").unwrap();
+            assert_eq!(v.expose().as_slice(), b"secret");
+        }
+    }
+
+    #[test]
+    fn fault_injecting_backend_fails_on_exact_nth_call() {
+        let inner = InMemoryBackend::new();
+        inner
+            .set_generic_password("svc", "acc", b"secret", default_opts())
+            .unwrap();
+        let fib =
+            FaultInjectingBackend::new(&inner, FaultMethod::Get, 2, BackendError::AccessDenied);
+
+        // call 1 → ok
+        fib.get_generic_password("svc", "acc").unwrap();
+        // call 2 → AccessDenied
+        let err = fib.get_generic_password("svc", "acc").unwrap_err();
+        assert!(matches!(err, BackendError::AccessDenied));
+        // call 3 → ok again
+        fib.get_generic_password("svc", "acc").unwrap();
+    }
+
+    #[test]
+    fn fault_injecting_backend_only_instruments_specified_method() {
+        let inner = InMemoryBackend::new();
+        inner
+            .set_generic_password("svc", "acc", b"secret", default_opts())
+            .unwrap();
+        // Instrumented on Set, fail_on_nth=1; Get should never fail
+        let fib =
+            FaultInjectingBackend::new(&inner, FaultMethod::Set, 1, BackendError::AccessDenied);
+
+        // Multiple gets succeed regardless of Set counter
+        for _ in 0..5 {
+            let v = fib.get_generic_password("svc", "acc").unwrap();
+            assert_eq!(v.expose().as_slice(), b"secret");
         }
     }
 }
