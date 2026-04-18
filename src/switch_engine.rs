@@ -40,6 +40,19 @@ pub enum NoOpReason {
     ContextNotFound,
 }
 
+// ─── Internal types ───────────────────────────────────────────────────────────
+
+/// Carries the planned store tag and the exact bytes written during apply.
+///
+/// Used by `verify_apply` to re-read each store and byte-compare.
+pub(crate) struct PlannedApply {
+    pub store: Store,
+    /// Bytes handed to the atomic write.  For `ClaudeDotJson` / `Keychain`
+    /// this field is reserved for 3.7 and should be empty — the verify stubs
+    /// are no-ops in Phase-2 scope.
+    pub expected_bytes: Vec<u8>,
+}
+
 // ─── Public API ──────────────────────────────────────────────────────────────
 
 /// Phase-2 scope: API-key only (plaintext `SecretRef`).
@@ -51,6 +64,7 @@ pub enum NoOpReason {
 /// Returns `Error::SnapshotWriteFailed` when the pre-apply snapshot cannot be written.
 /// Returns `Error::RollbackFailed` when rollback itself fails after an apply/verify error.
 /// Other variants propagate from `journal`, `claude_state`, and `backup` modules.
+#[allow(clippy::too_many_lines)]
 pub fn execute_switch(
     current: &ContextsFile,
     target_name: &str,
@@ -114,9 +128,10 @@ pub fn execute_switch(
             std::fs::set_permissions(&paths.backups_dir, std::fs::Permissions::from_mode(0o700));
     }
 
+    // Nanosecond precision prevents filename collisions during rapid back-to-back switches.
     let snapshot_filename = format!(
         "{}.json",
-        chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.3fZ")
+        chrono::Utc::now().format("%Y-%m-%dT%H-%M-%S%.9fZ")
     );
     let snapshot_path = paths.backups_dir.join(&snapshot_filename);
 
@@ -147,27 +162,35 @@ pub fn execute_switch(
     };
 
     // ── Phase 3: Apply ────────────────────────────────────────────────────────
-    // Step 1: settings.json write.
+    // Step 1: settings.json write — returns the bytes written for use in verify.
     let apply_result = apply_settings(target, stores.settings_json_path);
     // Step 2: ~/.claude.json merge — 2.4 scope: NO-OP for API-key targets.
     // TODO(3.7): wires claude.json merge for OAuth here.
     // Step 3: Keychain — 2.4 scope: no Keychain write for API-key targets.
     // TODO(3.5): wires Keychain write for OAuth / Keychain-backed API keys here.
 
-    if let Err(apply_err) = apply_result {
-        return rollback_and_report(
-            entry_id,
-            apply_err.to_string(),
-            &snap,
-            stores,
-            journal,
-            snapshot_path,
-        );
-    }
+    let written_bytes = match apply_result {
+        Ok(b) => b,
+        Err(apply_err) => {
+            return rollback_and_report(
+                entry_id,
+                apply_err.to_string(),
+                &snap,
+                stores,
+                journal,
+                snapshot_path,
+            );
+        }
+    };
 
     // ── Phase 4: Verify ───────────────────────────────────────────────────────
-    // Verify settings.json write.
-    if let Err(verify_err) = verify_settings(target, stores.settings_json_path) {
+    let plans = [PlannedApply {
+        store: Store::Settings,
+        expected_bytes: written_bytes,
+    }];
+    // 2.4 scope: ClaudeDotJson and Keychain stubs are no-ops in verify_apply.
+
+    if let Err(verify_err) = verify_apply(&plans, stores) {
         return rollback_and_report(
             entry_id,
             verify_err.to_string(),
@@ -177,7 +200,6 @@ pub fn execute_switch(
             snapshot_path,
         );
     }
-    // 2.4 scope: no claude.json verify; no Keychain verify.
 
     // ── Phase 5: Commit ───────────────────────────────────────────────────────
     journal.mark_completed(entry_id)?;
@@ -185,6 +207,32 @@ pub fn execute_switch(
         from,
         to: target_name.to_string(),
     })
+}
+
+/// Post-apply verification: re-read each store and compare to the planned value.
+///
+/// Returns `Ok(())` if all planned ops' results match their planned content.
+/// Returns `Err(VerifyFailed { which_store })` on the first mismatch.
+///
+/// Phase-2 scope: `Settings` is fully verified by byte-comparing the re-read
+/// file to the buffer handed to the atomic write.  `ClaudeDotJson` and
+/// `Keychain` are no-op stubs — they light up in issue 3.7.
+pub(crate) fn verify_apply(planned: &[PlannedApply], stores: &Stores<'_>) -> Result<(), Error> {
+    for plan in planned {
+        match plan.store {
+            Store::Settings => {
+                let actual = std::fs::read(stores.settings_json_path).map_err(Error::Io)?;
+                if actual != plan.expected_bytes {
+                    return Err(Error::VerifyFailed {
+                        which_store: journal::Store::Settings,
+                    });
+                }
+            }
+            // Stubs: wired in issue 3.7 when the engine writes these stores.
+            Store::ClaudeDotJson | Store::Keychain => {}
+        }
+    }
+    Ok(())
 }
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
@@ -258,38 +306,10 @@ fn build_settings_patch(
 }
 
 /// Apply the settings.json write for an API-key context.
-fn apply_settings(target: &Context, settings_path: &Path) -> Result<(), Error> {
+/// Returns the exact bytes written (for use in `PlannedApply`).
+fn apply_settings(target: &Context, settings_path: &Path) -> Result<Vec<u8>, Error> {
     let patch = build_settings_patch(target)?;
-    claude_state::save_settings_env(settings_path, patch, AuthModeHint::ApiKey)
-}
-
-/// Verify that settings.json reflects the planned write by re-reading and comparing.
-fn verify_settings(target: &Context, settings_path: &Path) -> Result<(), Error> {
-    let patch = build_settings_patch(target)?;
-    let settings = claude_state::load_settings(settings_path)?;
-    for (k, v_opt) in &patch {
-        let got = settings
-            .get("env")
-            .and_then(|e| e.get(k))
-            .and_then(|x| x.as_str());
-        match v_opt {
-            Some(expected) => {
-                if got != Some(expected.expose().as_str()) {
-                    return Err(Error::VerifyFailed {
-                        which_store: journal::Store::Settings,
-                    });
-                }
-            }
-            None => {
-                if got.is_some() {
-                    return Err(Error::VerifyFailed {
-                        which_store: journal::Store::Settings,
-                    });
-                }
-            }
-        }
-    }
-    Ok(())
+    claude_state::save_settings_env_returning_bytes(settings_path, patch, AuthModeHint::ApiKey)
 }
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
@@ -386,7 +406,7 @@ mod tests {
         }
     }
 
-    // ── Tests ─────────────────────────────────────────────────────────────────
+    // ── Engine tests ──────────────────────────────────────────────────────────
 
     #[test]
     fn already_active_returns_noop() {
@@ -564,5 +584,90 @@ mod tests {
             matches!(outcome, SwitchOutcome::Applied { from: None, .. }),
             "from must be None when no prior context active"
         );
+    }
+
+    // ── verify_apply unit tests ───────────────────────────────────────────────
+
+    #[test]
+    fn verify_apply_empty_plan_ok() {
+        let env = setup_test_env();
+        let backend = InMemoryBackend::new();
+        let stores = make_stores(&backend, &env);
+        verify_apply(&[], &stores).unwrap();
+    }
+
+    #[test]
+    fn verify_apply_settings_match_ok() {
+        let env = setup_test_env();
+        let backend = InMemoryBackend::new();
+        let stores = make_stores(&backend, &env);
+
+        // Write some bytes to settings.json.
+        let content = b"{\"env\":{\"ANTHROPIC_API_KEY\":\"sk-ant-test\"}}";
+        std::fs::write(&env.settings_path, content).unwrap();
+
+        // PlannedApply with identical expected bytes → Ok.
+        let plan = PlannedApply {
+            store: Store::Settings,
+            expected_bytes: content.to_vec(),
+        };
+        verify_apply(&[plan], &stores).unwrap();
+    }
+
+    #[test]
+    fn verify_apply_settings_mismatch_errors() {
+        let env = setup_test_env();
+        let backend = InMemoryBackend::new();
+        let stores = make_stores(&backend, &env);
+
+        // Write one set of bytes to disk.
+        std::fs::write(
+            &env.settings_path,
+            b"{\"env\":{\"ANTHROPIC_API_KEY\":\"sk-ant-actual\"}}",
+        )
+        .unwrap();
+
+        // PlannedApply with different expected bytes → VerifyFailed { Settings }.
+        let plan = PlannedApply {
+            store: Store::Settings,
+            expected_bytes: b"{\"env\":{\"ANTHROPIC_API_KEY\":\"sk-ant-expected\"}}".to_vec(),
+        };
+        let err = verify_apply(&[plan], &stores).unwrap_err();
+        assert!(
+            matches!(
+                err,
+                Error::VerifyFailed {
+                    which_store: Store::Settings
+                }
+            ),
+            "expected VerifyFailed(Settings), got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn verify_apply_keychain_stub_noop_ok() {
+        let env = setup_test_env();
+        let backend = InMemoryBackend::new();
+        let stores = make_stores(&backend, &env);
+
+        // A planned Keychain op with arbitrary bytes — stub returns Ok in Phase-2 scope.
+        let plan = PlannedApply {
+            store: Store::Keychain,
+            expected_bytes: b"arbitrary-keychain-blob".to_vec(),
+        };
+        verify_apply(&[plan], &stores).unwrap();
+    }
+
+    #[test]
+    fn verify_apply_claude_dot_json_stub_noop_ok() {
+        let env = setup_test_env();
+        let backend = InMemoryBackend::new();
+        let stores = make_stores(&backend, &env);
+
+        let plan = PlannedApply {
+            store: Store::ClaudeDotJson,
+            expected_bytes: b"{\"oauthAccount\":\"stub\"}".to_vec(),
+        };
+        verify_apply(&[plan], &stores).unwrap();
     }
 }

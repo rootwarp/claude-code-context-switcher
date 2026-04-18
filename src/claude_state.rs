@@ -114,10 +114,12 @@ pub fn load_settings_base_url(path: &Path) -> Result<Option<url::Url>, Error> {
 /// Write the `env` block of `settings.json` atomically, applying forbidden-key guards.
 ///
 /// `env_patch` maps env-var name → `Option<Secret<String>>`:
+///
 /// - `Some(value)` → set the key to that value.
 /// - `None` → remove the key if present.
 ///
 /// Forbidden-key rules:
+///
 /// - `CLAUDE_CODE_OAUTH_TOKEN` is **always** refused (returns `SettingsForbiddenKey`).
 /// - In `OAuth` auth mode: every `CLAUDE_CODE_*` key is stripped silently
 ///   (arch §2, issue #49659 — env keys can break Keychain OAuth retrieval).
@@ -135,6 +137,30 @@ pub fn save_settings_env(
     env_patch: BTreeMap<String, Option<Secret<String>>>,
     auth_mode_hint: AuthModeHint,
 ) -> Result<(), Error> {
+    save_settings_env_inner(path, env_patch, auth_mode_hint).map(|_| ())
+}
+
+/// Variant of [`save_settings_env`] that also returns the bytes written to disk.
+///
+/// The returned `Vec<u8>` is the exact buffer passed to [`write_atomic_0600`],
+/// suitable for post-apply byte-comparison in `switch_engine::verify_apply`.
+///
+/// # Errors
+///
+/// Same error conditions as [`save_settings_env`].
+pub fn save_settings_env_returning_bytes(
+    path: &Path,
+    env_patch: BTreeMap<String, Option<Secret<String>>>,
+    auth_mode_hint: AuthModeHint,
+) -> Result<Vec<u8>, Error> {
+    save_settings_env_inner(path, env_patch, auth_mode_hint)
+}
+
+fn save_settings_env_inner(
+    path: &Path,
+    env_patch: BTreeMap<String, Option<Secret<String>>>,
+    auth_mode_hint: AuthModeHint,
+) -> Result<Vec<u8>, Error> {
     // Guard: CLAUDE_CODE_OAUTH_TOKEN is unconditionally forbidden (#37512).
     if env_patch.contains_key("CLAUDE_CODE_OAUTH_TOKEN") {
         return Err(Error::SettingsForbiddenKey {
@@ -192,7 +218,7 @@ pub fn save_settings_env(
 
     let bytes = serde_json::to_vec_pretty(&root)?;
     write_atomic_0600(path, &bytes)?;
-    Ok(())
+    Ok(bytes)
 }
 
 #[cfg(test)]
