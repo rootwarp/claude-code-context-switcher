@@ -119,11 +119,12 @@ fn cctx_switch_oauth_context_exits_with_phase3_message() {
     let (cctx_home, claude_dir) = setup_dirs();
     write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
 
+    // Engine returns Unimplemented; message references "3.5" (the landing issue).
     cctx(&cctx_home, &claude_dir)
         .arg("personal")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("Phase 3"));
+        .stderr(predicate::str::contains("3.5"));
 }
 
 // ── test 5 ─────────────────────────────────────────────────────────────────
@@ -161,4 +162,82 @@ fn cctx_switch_preserves_unrelated_settings_keys() {
             .map_or(true, |v| v.is_null()),
         "ANTHROPIC_AUTH_TOKEN must be cleared"
     );
+}
+
+// ── test 6 ─────────────────────────────────────────────────────────────────
+#[test]
+fn cctx_switch_creates_backup_file_in_backups_dir() {
+    let (cctx_home, claude_dir) = setup_dirs();
+    write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("console-key")
+        .assert()
+        .success();
+
+    let backups_dir = cctx_home.path().join("backups");
+    assert!(backups_dir.exists(), "backups dir must be created");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 1, "exactly one backup file after switch");
+    assert!(
+        entries[0].file_name().to_string_lossy().ends_with(".json"),
+        "backup file should end in .json"
+    );
+}
+
+// ── test 7 ─────────────────────────────────────────────────────────────────
+/// Switch between two contexts produces two backups total.
+#[test]
+fn cctx_switch_between_two_contexts_produces_two_backups() {
+    // Build a contexts YAML with two plaintext API-key contexts whose fingerprints
+    // match the actual SHA-256 of their stored keys (required for idempotency guard).
+    let yaml = r#"version: 1
+contexts:
+  ctx-a:
+    name: ctx-a
+    auth_mode:
+      api_key:
+        base_url: null
+    identity:
+      label: "Context A"
+    fingerprint: "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: plaintext
+      value: "sk-ant-ctx-a-key"
+  ctx-b:
+    name: ctx-b
+    auth_mode:
+      api_key:
+        base_url: null
+    identity:
+      label: "Context B"
+    fingerprint: "b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: plaintext
+      value: "sk-ant-ctx-b-key"
+"#;
+    let (cctx_home, claude_dir) = setup_dirs();
+    fs::write(cctx_home.path().join("contexts.yaml"), yaml).unwrap();
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("ctx-a")
+        .assert()
+        .success();
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("ctx-b")
+        .assert()
+        .success();
+
+    let backups_dir = cctx_home.path().join("backups");
+    let entries: Vec<_> = fs::read_dir(&backups_dir)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .collect();
+    assert_eq!(entries.len(), 2, "two backups: one per switch");
 }

@@ -1,14 +1,14 @@
 //! Parse argv via clap derive and dispatch to command handlers.
 
-use std::collections::BTreeMap;
-
 use clap::{ArgAction, Parser, Subcommand};
 use clap_complete::Shell;
 
-use crate::claude_state::{self, AuthModeHint};
+use crate::claude_state;
 use crate::config::{self, ContextsFile};
 use crate::context::{self, AuthMode, Fingerprint, IdentityMetadata, SecretRef};
-use crate::secret::Secret;
+use crate::credential_backend::InMemoryBackend;
+use crate::journal::Journal;
+use crate::switch_engine;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -126,38 +126,55 @@ fn handle_current() -> anyhow::Result<()> {
     );
 }
 
+fn current_user_short_name() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "default".to_string())
+}
+
 fn handle_switch(name: &str) -> anyhow::Result<()> {
     let paths = config::resolve_paths()?;
     let cf = config::load(&paths)?;
-    let ctx = cf
-        .contexts
-        .get(name)
-        .ok_or_else(|| anyhow::anyhow!("context not found: {name}"))?;
 
-    match (&ctx.auth_mode, &ctx.secret_ref) {
-        (AuthMode::ApiKey { base_url }, SecretRef::Plaintext { value }) => {
-            let mut patch: BTreeMap<String, Option<Secret<String>>> = BTreeMap::new();
-            patch.insert("ANTHROPIC_API_KEY".to_string(), Some(value.clone()));
-            patch.insert("ANTHROPIC_AUTH_TOKEN".to_string(), None);
-            if let Some(url) = base_url {
-                patch.insert(
-                    "ANTHROPIC_BASE_URL".to_string(),
-                    Some(Secret::new(url.to_string())),
-                );
-            } else {
-                patch.insert("ANTHROPIC_BASE_URL".to_string(), None);
+    // Phase 2: InMemoryBackend only; Phase 3 swaps in SecurityFrameworkBackend.
+    let backend = InMemoryBackend::new();
+    let settings_path = claude_state::resolve_settings_path()?;
+    let claude_dir = claude_state::resolve_claude_dir()?;
+    // ~/.claude.json lives at $HOME/.claude.json (OUTSIDE ~/.claude/).
+    let claude_dot_json_path = claude_dir.parent().map_or_else(
+        || claude_dir.join(".claude.json"),
+        |h| h.join(".claude.json"),
+    );
+
+    let mut journal = Journal::open(&paths.journal_file)?;
+    let stores = switch_engine::Stores {
+        backend: &backend,
+        keychain_service: "Claude Code-credentials",
+        keychain_account: &current_user_short_name(),
+        claude_dot_json_path: &claude_dot_json_path,
+        settings_json_path: &settings_path,
+    };
+
+    match switch_engine::execute_switch(&cf, name, &stores, &mut journal, &paths)? {
+        switch_engine::SwitchOutcome::Applied { from, to } => {
+            match from {
+                Some(f) => eprintln!("switched from {f} to {to}"),
+                None => eprintln!("switched to {to}"),
             }
-
-            let settings_path = claude_state::resolve_settings_path()?;
-            claude_state::save_settings_env(&settings_path, patch, AuthModeHint::ApiKey)?;
-            eprintln!("switched to {name}");
             Ok(())
         }
-        (AuthMode::ApiKey { .. }, SecretRef::Keychain { .. }) => {
-            anyhow::bail!("keychain-backed API-key contexts not supported until Phase 3")
-        }
-        (AuthMode::ApiKey { .. }, SecretRef::ClaudeCodeKeychain) | (AuthMode::OAuth, _) => {
-            anyhow::bail!("OAuth context switching lands in Phase 3")
+        switch_engine::SwitchOutcome::NoOp { reason } => match reason {
+            switch_engine::NoOpReason::AlreadyActive => {
+                eprintln!("already active: {name}");
+                Ok(())
+            }
+            switch_engine::NoOpReason::ContextNotFound => {
+                anyhow::bail!("context not found: {name}")
+            }
+            switch_engine::NoOpReason::NoContextsConfigured => {
+                anyhow::bail!("no contexts configured")
+            }
+        },
+        switch_engine::SwitchOutcome::RolledBack { cause } => {
+            anyhow::bail!("switch failed and was rolled back: {cause}");
         }
     }
 }

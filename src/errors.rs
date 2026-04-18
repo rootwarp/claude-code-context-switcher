@@ -114,4 +114,15 @@ pub enum Error {
     /// The hex-encoded keychain blob in a snapshot file is malformed.
     #[error("invalid hex in snapshot keychain blob: {msg}")]
     SnapshotInvalidHex { msg: String },
+
+    /// Post-apply read-back didn't match the planned value for the given store.
+    #[error("verify failed for store {which_store:?}")]
+    VerifyFailed { which_store: crate::journal::Store },
+
+    /// Rollback itself failed after a failed apply or verify.
+    #[error("rollback failed after attempting {attempted_stores:?}; snapshot at {path}")]
+    RollbackFailed {
+        attempted_stores: Vec<crate::journal::Store>,
+        path: PathBuf,
+    },
 }
