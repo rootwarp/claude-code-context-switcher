@@ -142,4 +142,10 @@ pub enum Error {
         journal_id: u64,
         snapshot_path: PathBuf,
     },
+
+    /// A mutating command was refused because `.credentials.json` exists, indicating
+    /// Claude Code is bypassing the Keychain (research 05).  The long diagnostic message
+    /// is rendered by the CLI layer; this one-liner is for error-chain display.
+    #[error("claude.json in .credentials.json fallback mode; refusing to switch")]
+    CredentialsJsonFallback { path: PathBuf },
 }

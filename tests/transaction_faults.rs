@@ -53,6 +53,7 @@ struct TestEnv {
     pub paths: ConfigPaths,
     pub settings_path: PathBuf,
     pub claude_dot_json_path: PathBuf,
+    pub claude_dir: PathBuf,
 }
 
 fn setup_test_env() -> TestEnv {
@@ -67,12 +68,14 @@ fn setup_test_env() -> TestEnv {
     };
     let settings_path = claude_dir.path().join("settings.json");
     let claude_dot_json_path = claude_dir.path().join(".claude.json");
+    let claude_dir_path = claude_dir.path().to_path_buf();
     TestEnv {
         _cctx_dir: cctx_dir,
         _claude_dir: claude_dir,
         paths,
         settings_path,
         claude_dot_json_path,
+        claude_dir: claude_dir_path,
     }
 }
 
@@ -86,6 +89,7 @@ fn make_stores_with_backend<'a>(
         keychain_account: "test-acc",
         claude_dot_json_path: &env.claude_dot_json_path,
         settings_json_path: &env.settings_path,
+        claude_dir: &env.claude_dir,
     }
 }
 

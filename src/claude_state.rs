@@ -343,6 +343,48 @@ fn save_settings_env_inner(
     Ok(bytes)
 }
 
+// ── .credentials.json fallback detection ──────────────────────────────────
+
+/// Whether the `.credentials.json` fallback file exists on macOS.
+///
+/// `Present` means Claude Code is NOT reading OAuth from the Keychain; mutating
+/// commands must refuse.  `Absent` means normal Keychain-backed flow.
+///
+/// On non-macOS targets `.credentials.json` is the canonical store, so detection
+/// always returns `Absent` there (refusal logic does not apply).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FallbackState {
+    Absent,
+    Present { path: PathBuf, size_bytes: u64 },
+}
+
+/// Detect if `.credentials.json` fallback file exists on macOS.
+///
+/// Returns `Present` iff the file exists AND is non-zero in length.
+/// `claude_dir` is `$CLAUDE_CONFIG_DIR` if set, else `$HOME/.claude`. Caller resolves.
+///
+/// Zero-byte files are treated as `Absent` (crash-artifact guard per research 05 §1).
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn detect_credentials_json_fallback(claude_dir: &Path) -> FallbackState {
+    let path = claude_dir.join(".credentials.json");
+    match std::fs::metadata(&path) {
+        Ok(meta) if meta.is_file() && meta.len() > 0 => FallbackState::Present {
+            path,
+            size_bytes: meta.len(),
+        },
+        _ => FallbackState::Absent,
+    }
+}
+
+/// Non-macOS stub: `.credentials.json` is the canonical store on Linux/Windows,
+/// so cctx never treats it as a fallback condition there.
+#[cfg(not(target_os = "macos"))]
+#[must_use]
+pub fn detect_credentials_json_fallback(_claude_dir: &Path) -> FallbackState {
+    FallbackState::Absent
+}
+
 #[cfg(test)]
 #[allow(clippy::similar_names)] // `path`/`patch` are intentional distinct names in test helpers
 mod tests {
@@ -804,5 +846,62 @@ mod tests {
             v.get("organizationUuid").is_some(),
             "expected organizationUuid key"
         );
+    }
+
+    // ── FallbackState / detect_credentials_json_fallback tests ───────────────
+
+    // test 25: absent when file missing
+    #[test]
+    fn detect_fallback_absent_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let state = detect_credentials_json_fallback(dir.path());
+        assert_eq!(state, FallbackState::Absent);
+    }
+
+    // test 26: present when non-zero file exists (macOS only; non-macOS always Absent)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_fallback_present_when_file_exists_nonzero() {
+        let dir = TempDir::new().unwrap();
+        let cred_path = dir.path().join(".credentials.json");
+        fs::write(&cred_path, b"{\"foo\":1}").unwrap();
+        let state = detect_credentials_json_fallback(dir.path());
+        match state {
+            FallbackState::Present { path, size_bytes } => {
+                assert_eq!(path, cred_path);
+                assert_eq!(size_bytes, 9);
+            }
+            FallbackState::Absent => panic!("expected Present"),
+        }
+    }
+
+    // test 27: absent when file is zero bytes (crash-artifact guard)
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_fallback_absent_when_file_is_empty() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".credentials.json"), b"").unwrap();
+        let state = detect_credentials_json_fallback(dir.path());
+        assert_eq!(state, FallbackState::Absent);
+    }
+
+    // test 28: absent when path is a directory named .credentials.json
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn detect_fallback_absent_when_path_is_directory() {
+        let dir = TempDir::new().unwrap();
+        fs::create_dir(dir.path().join(".credentials.json")).unwrap();
+        let state = detect_credentials_json_fallback(dir.path());
+        assert_eq!(state, FallbackState::Absent);
+    }
+
+    // test 29: non-macOS always returns Absent even when file is present
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn detect_fallback_on_non_macos_always_absent() {
+        let dir = TempDir::new().unwrap();
+        fs::write(dir.path().join(".credentials.json"), b"{\"foo\":1}").unwrap();
+        let state = detect_credentials_json_fallback(dir.path());
+        assert_eq!(state, FallbackState::Absent);
     }
 }

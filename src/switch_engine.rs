@@ -24,6 +24,8 @@ pub struct Stores<'a> {
     pub claude_dot_json_path: &'a Path,
     /// Path to `~/.claude/settings.json`.
     pub settings_json_path: &'a Path,
+    /// `$CLAUDE_CONFIG_DIR` if set, else `$HOME/.claude`.  Used for fallback detection.
+    pub claude_dir: &'a Path,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -73,6 +75,14 @@ pub fn execute_switch(
     paths: &ConfigPaths,
 ) -> Result<SwitchOutcome, Error> {
     // ── Phase 1: Plan ─────────────────────────────────────────────────────────
+
+    // Refuse before any mutation if the .credentials.json fallback file exists.
+    if let claude_state::FallbackState::Present { path, .. } =
+        claude_state::detect_credentials_json_fallback(stores.claude_dir)
+    {
+        return Err(Error::CredentialsJsonFallback { path });
+    }
+
     let Some(target) = current.contexts.get(target_name) else {
         return Ok(SwitchOutcome::NoOp {
             reason: NoOpReason::ContextNotFound,
@@ -368,6 +378,7 @@ mod tests {
         pub paths: ConfigPaths,
         pub settings_path: PathBuf,
         pub claude_dot_json_path: PathBuf,
+        pub claude_dir: PathBuf,
     }
 
     fn setup_test_env() -> TestEnv {
@@ -382,12 +393,14 @@ mod tests {
         };
         let settings_path = claude_dir.path().join("settings.json");
         let claude_dot_json_path = claude_dir.path().join(".claude.json");
+        let claude_dir_path = claude_dir.path().to_path_buf();
         TestEnv {
             _cctx_dir: cctx_dir,
             _claude_dir: claude_dir,
             paths,
             settings_path,
             claude_dot_json_path,
+            claude_dir: claude_dir_path,
         }
     }
 
@@ -403,6 +416,7 @@ mod tests {
             keychain_account: "test-acc",
             claude_dot_json_path: &env.claude_dot_json_path,
             settings_json_path: &env.settings_path,
+            claude_dir: &env.claude_dir,
         }
     }
 

@@ -248,6 +248,7 @@ mod tests {
             keychain_account: "acc",
             claude_dot_json_path: &claude_dot_json,
             settings_json_path: &settings_json,
+            claude_dir: dir.path(),
         };
 
         let report = diagnose_and_repair(&paths, Some(&stores), RepairMode::Rollback).unwrap();

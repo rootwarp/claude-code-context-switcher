@@ -107,6 +107,35 @@ pub fn render_list(cf: &ContextsFile, active_marker: Option<&str>) -> Vec<String
         .collect()
 }
 
+/// Build the long multi-line refusal message shown to the user when
+/// `.credentials.json` fallback is detected (research 05 §2, verbatim).
+#[must_use]
+pub fn format_credentials_json_fallback_help(path: &std::path::Path) -> String {
+    format!(
+        "cctx: refusing to switch — a credentials fallback file exists on this macOS\n\
+machine, which means Claude Code is NOT reading OAuth from the Keychain. cctx\n\
+only manages the Keychain-backed flow on macOS.\n\
+\n\
+  Fallback file: {path}\n\
+\n\
+This usually means one of:\n\
+  \u{2022} $CLAUDE_CONFIG_DIR is set, directing Claude Code to a custom root.\n\
+  \u{2022} An SSH session with a locked Keychain forced Claude Code to the file\n\
+    fallback.\n\
+  \u{2022} A prior export of CLAUDE_CODE_OAUTH_TOKEN triggered upstream bug #37512,\n\
+    which silently purges the Keychain entry on child-process exit.\n\
+\n\
+Resolve by:\n\
+  1. unset CLAUDE_CONFIG_DIR                                (if set)\n\
+  2. rm {path}\n\
+  3. claude /login                                          (repopulates Keychain)\n\
+  4. retry cctx\n\
+\n\
+See: https://github.com/anthropics/claude-code/issues/37512",
+        path = path.display()
+    )
+}
+
 fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
     let paths = config::resolve_paths()?;
     ensure_config_dir(&paths)?;
@@ -118,6 +147,18 @@ fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
             pending.len(),
             if pending.len() == 1 { "y" } else { "ies" }
         );
+    }
+
+    // Warn (do not refuse) when .credentials.json fallback is present.
+    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
+        if let claude_state::FallbackState::Present { path, .. } =
+            claude_state::detect_credentials_json_fallback(&claude_dir)
+        {
+            eprintln!(
+                "warning: .credentials.json exists at {} — active-context detection unavailable (run `cctx doctor`)",
+                path.display()
+            );
+        }
     }
 
     let cf = config::load(&paths)?;
@@ -136,6 +177,17 @@ fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
 /// Active-context detection requires fingerprinting which lands in Phase 3.
 /// Exit code 3 is signalled by `main` when the error message contains "not implemented".
 fn handle_current() -> anyhow::Result<()> {
+    // Warn (do not refuse) when .credentials.json fallback is present.
+    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
+        if let claude_state::FallbackState::Present { path, .. } =
+            claude_state::detect_credentials_json_fallback(&claude_dir)
+        {
+            eprintln!(
+                "warning: .credentials.json exists at {} — active-context detection unavailable (run `cctx doctor`)",
+                path.display()
+            );
+        }
+    }
     anyhow::bail!(
         "active-context detection not implemented until Phase 3 (fingerprint module). \
          Use `cctx list` to see configured contexts."
@@ -173,6 +225,7 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
         keychain_account: &current_user_short_name(),
         claude_dot_json_path: &claude_dot_json_path,
         settings_json_path: &settings_path,
+        claude_dir: &claude_dir,
     };
 
     match switch_engine::execute_switch(&cf, name, &stores, &mut journal, &paths)? {
@@ -202,6 +255,15 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
 }
 
 fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
+    // Refuse before any mutation if .credentials.json fallback is present.
+    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
+        if let claude_state::FallbackState::Present { path, .. } =
+            claude_state::detect_credentials_json_fallback(&claude_dir)
+        {
+            return Err(Error::CredentialsJsonFallback { path }.into());
+        }
+    }
+
     // Capture env-dependent paths at entry before any blocking operations.
     let settings_path_for_guard = claude_state::resolve_settings_path().ok();
     let paths = config::resolve_paths()?;
@@ -250,6 +312,15 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
             "--oauth interactive add is P1 (issue 6.1); for now, log in manually with \
              `claude /login` then run `cctx add {name}` without --oauth"
         );
+    }
+
+    // Refuse before any mutation if .credentials.json fallback is present.
+    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
+        if let claude_state::FallbackState::Present { path, .. } =
+            claude_state::detect_credentials_json_fallback(&claude_dir)
+        {
+            return Err(Error::CredentialsJsonFallback { path }.into());
+        }
     }
 
     let paths = config::resolve_paths()?;
@@ -301,8 +372,17 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
     }
 }
 
-fn handle_rename() {
+fn handle_rename() -> anyhow::Result<()> {
+    // Refuse before any mutation if .credentials.json fallback is present.
+    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
+        if let claude_state::FallbackState::Present { path, .. } =
+            claude_state::detect_credentials_json_fallback(&claude_dir)
+        {
+            return Err(Error::CredentialsJsonFallback { path }.into());
+        }
+    }
     eprintln!("not implemented in v1");
+    Ok(())
 }
 
 fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<()> {
@@ -339,6 +419,7 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
         keychain_account: &current_user_short_name(),
         claude_dot_json_path: &claude_dot_json_path,
         settings_json_path: &settings_path,
+        claude_dir: &claude_dir,
     };
 
     let stores_opt = if mode == RepairMode::Rollback {
@@ -346,6 +427,18 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
     } else {
         None
     };
+
+    // Report fallback state as part of doctor output (never refuse).
+    match claude_state::detect_credentials_json_fallback(&claude_dir) {
+        claude_state::FallbackState::Present { path, size_bytes } => {
+            eprintln!(
+                "warning: .credentials.json fallback file detected at {} ({size_bytes} bytes) — \
+                 Claude Code is NOT using Keychain. Run `cctx doctor` after removing it.",
+                path.display()
+            );
+        }
+        claude_state::FallbackState::Absent => {}
+    }
 
     let report = doctor::diagnose_and_repair(&paths, stores_opt, mode)
         .map_err(|e| anyhow::anyhow!("{e}"))?;
@@ -439,10 +532,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         (Some(Command::Switch { name }), _, _) | (None, Some(name), false) => handle_switch(&name),
         (Some(Command::Add { name, oauth }), _, _) => handle_add(&name, oauth),
         (Some(Command::Delete { name, force }), _, _) => handle_delete(&name, force),
-        (Some(Command::Rename { .. }), _, _) => {
-            handle_rename();
-            Ok(())
-        }
+        (Some(Command::Rename { .. }), _, _) => handle_rename(),
         (
             Some(Command::Doctor {
                 dry_run,
