@@ -8,7 +8,9 @@ use crate::errors::Error;
 use crate::secret::Secret;
 
 /// A stored authentication context.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq` only — `IdentityMetadata` contains `OAuthAccount` which has no `Eq` (Map<String,Value> has f64).
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Context {
     /// Unique name for this context (e.g. `"personal"`, `"work"`).
     pub name: String,
@@ -81,10 +83,12 @@ impl TryFrom<AuthModeWire> for AuthMode {
 
 /// Identity metadata stored alongside a context for display and matching.
 ///
-/// For OAuth contexts, `user_id`, `account_uuid`, and `email_hint` are populated.
+/// For OAuth contexts, `user_id`, `account_uuid`, `email_hint`, and `oauth_account` are populated.
 /// For API-key contexts, only `label` is used.
 /// All fields are optional and omitted from YAML when absent.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+// `PartialEq` only — `OAuthAccount` has no `Eq` (`Map<String,Value>` contains f64).
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct IdentityMetadata {
     /// Hex user ID from `~/.claude.json` (OAuth only).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -98,6 +102,9 @@ pub struct IdentityMetadata {
     /// Human-readable label (API-key contexts).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
+    /// Full `oauthAccount` payload for `~/.claude.json` merge (OAuth only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub oauth_account: Option<crate::claude_state::OAuthAccount>,
 }
 
 /// Where the secret material for a context is stored.
@@ -216,6 +223,7 @@ mod tests {
                 account_uuid: Some("8c2edef".to_string()),
                 email_hint: Some("a***@example.com".to_string()),
                 label: None,
+                oauth_account: None,
             },
             fingerprint: Fingerprint([0x3b; 32]),
             created_at: fixed_ts(),

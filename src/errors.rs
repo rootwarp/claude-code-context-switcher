@@ -148,4 +148,8 @@ pub enum Error {
     /// is rendered by the CLI layer; this one-liner is for error-chain display.
     #[error("claude.json in .credentials.json fallback mode; refusing to switch")]
     CredentialsJsonFallback { path: PathBuf },
+
+    /// A stored context is missing required fields for the requested operation.
+    #[error("context '{name}' is corrupt or incomplete: {detail}")]
+    ContextCorrupt { name: String, detail: String },
 }

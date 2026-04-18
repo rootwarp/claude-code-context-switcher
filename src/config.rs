@@ -20,7 +20,9 @@ pub struct ConfigPaths {
 }
 
 /// The top-level `contexts.yaml` document.
-#[derive(Debug, Serialize, Deserialize, PartialEq, Eq)]
+// `PartialEq` only — `Context` contains `IdentityMetadata.oauth_account` which has no `Eq`.
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Serialize, Deserialize, PartialEq)]
 pub struct ContextsFile {
     pub version: u32,
     pub contexts: IndexMap<String, Context>,
@@ -145,6 +147,7 @@ mod tests {
                 account_uuid: Some("8c2edef".to_string()),
                 email_hint: Some("a***@example.com".to_string()),
                 label: None,
+                oauth_account: None,
             },
             fingerprint: Fingerprint([0x3b; 32]),
             created_at: fixed_ts(),

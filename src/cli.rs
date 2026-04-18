@@ -15,6 +15,9 @@ use crate::journal::Journal;
 use crate::lock;
 use crate::switch_engine;
 
+#[cfg(feature = "real-keychain")]
+use crate::credential_backend::SecurityFrameworkBackend;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "cctx",
@@ -188,8 +191,15 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
 
     let cf = config::load(&paths)?;
 
-    // Phase 2: InMemoryBackend only; Phase 3 swaps in SecurityFrameworkBackend.
-    let backend = InMemoryBackend::new();
+    // Use real Keychain backend when compiled with the real-keychain feature.
+    // Falls back to InMemoryBackend for testing.
+    #[cfg(feature = "real-keychain")]
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> =
+        Box::new(SecurityFrameworkBackend::new());
+    #[cfg(not(feature = "real-keychain"))]
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> =
+        Box::new(InMemoryBackend::new());
+
     let settings_path = claude_state::resolve_settings_path()?;
     let claude_dir = claude_state::resolve_claude_dir()?;
     // ~/.claude.json lives at $HOME/.claude.json (OUTSIDE ~/.claude/).
@@ -200,7 +210,7 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
 
     let mut journal = Journal::open(&paths.journal_file)?;
     let stores = switch_engine::Stores {
-        backend: &backend,
+        backend: &*backend,
         keychain_service: "Claude Code-credentials",
         keychain_account: &current_user_short_name(),
         claude_dot_json_path: &claude_dot_json_path,
