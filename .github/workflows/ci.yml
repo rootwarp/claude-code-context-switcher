@@ -1,0 +1,77 @@
+# CI matrix for claude-code-context-switcher.
+#
+# Two jobs:
+#   test-macos              — default features (real-keychain on); validates the
+#                             primary developer target.
+#   test-linux-no-default   — --no-default-features; this is the feature-gate
+#                             canary. security-framework and core-foundation are
+#                             macOS-only crates that must stay behind the
+#                             `real-keychain` cargo feature so a future Linux/
+#                             Windows backend can build without macOS SDKs. If
+#                             security-framework leaks into the dependency graph
+#                             as a non-optional transitive dep, this job fails.
+#
+# Real-Keychain integration tests (tagged #[ignore]) require a signed-in macOS
+# interactive session with SecurityAgent dialog access. They are skipped in CI
+# via `-- --skip ignored` and run manually with CCTX_REAL_KEYCHAIN=1.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+name: CI
+
+jobs:
+  test-macos:
+    name: macOS (default features)
+    runs-on: macos-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --locked -- -D warnings
+
+      - name: build
+        run: cargo build --locked
+
+      - name: test
+        run: cargo test --locked -- --skip ignored
+
+  test-linux-no-default:
+    name: Linux (--no-default-features, feature-gate canary)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all --check
+
+      - name: clippy
+        run: cargo clippy --locked --no-default-features -- -D warnings
+
+      - name: build
+        run: cargo build --locked --no-default-features
+
+      - name: test
+        run: cargo test --locked --no-default-features -- --skip ignored
