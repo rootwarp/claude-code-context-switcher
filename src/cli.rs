@@ -7,7 +7,7 @@ use clap_complete::Shell;
 
 use crate::claude_state::{self, AuthModeHint};
 use crate::config::{self, ContextsFile};
-use crate::context::{AuthMode, SecretRef};
+use crate::context::{self, AuthMode, Fingerprint, IdentityMetadata, SecretRef};
 use crate::secret::Secret;
 
 #[derive(Parser, Debug)]
@@ -162,22 +162,64 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
     }
 }
 
+fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
+    if oauth {
+        anyhow::bail!(
+            "--oauth interactive add is P1 (issue 6.1); for now, log in manually with \
+             `claude /login` then run `cctx add {name}` without --oauth"
+        );
+    }
+
+    let paths = config::resolve_paths()?;
+    let mut cf = config::load(&paths)?;
+
+    if cf.contexts.contains_key(name) {
+        anyhow::bail!("context already exists: {name}. use `cctx delete {name}` first to replace.");
+    }
+
+    let settings_path = claude_state::resolve_settings_path()?;
+    let api_key = claude_state::load_settings_api_key(&settings_path)?;
+
+    match api_key {
+        Some(key) => {
+            let base_url = claude_state::load_settings_base_url(&settings_path)?;
+            let fingerprint = Fingerprint::from_api_key(&key);
+            let ctx = context::Context {
+                name: name.to_string(),
+                auth_mode: AuthMode::ApiKey { base_url },
+                identity: IdentityMetadata {
+                    label: Some(format!(
+                        "API key captured {}",
+                        chrono::Utc::now().format("%Y-%m-%d")
+                    )),
+                    ..Default::default()
+                },
+                fingerprint,
+                created_at: chrono::Utc::now(),
+                secret_ref: SecretRef::Plaintext { value: key },
+            };
+            cf.contexts.insert(name.to_string(), ctx);
+            config::save(&paths, &cf)?;
+            eprintln!("captured {name} as API-key context");
+            Ok(())
+        }
+        None => {
+            anyhow::bail!(
+                "no active API-key identity found in ~/.claude/settings.json. \
+                 Run `claude /login` first, then re-run `cctx add {name}`. \
+                 OAuth capture lands in Phase 3."
+            );
+        }
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match (cli.cmd, cli.name, cli.current) {
         (None, None, false) => handle_list(None),
         (None, _, true) | (Some(Command::Current), _, _) => handle_current(),
         (Some(Command::Switch { name }), _, _) | (None, Some(name), false) => handle_switch(&name),
-        (Some(Command::Add { oauth: true, .. }), _, _) => {
-            eprintln!(
-                "cctx add --oauth is not implemented in v1; \
-                 see `claude /login` first, then `cctx add <name>`."
-            );
-            Ok(())
-        }
-        (Some(Command::Add { .. }), _, _) => {
-            anyhow::bail!("add not implemented yet (issue 1.6)")
-        }
+        (Some(Command::Add { name, oauth }), _, _) => handle_add(&name, oauth),
         (Some(Command::Delete { .. }), _, _) => {
             anyhow::bail!("delete not implemented yet (issue 1.7)")
         }
@@ -312,9 +354,8 @@ mod tests {
 
     #[test]
     fn dispatch_ok_variants() {
-        // Variants that should return Ok after 1.4 wiring (not current/switch/add/delete stubs).
+        // Variants that return Ok (non-mutating stubs or no-ops).
         let ok_variants: Vec<Cli> = vec![
-            Cli::try_parse_from(["cctx", "add", "x", "--oauth"]).unwrap(),
             Cli::try_parse_from(["cctx", "rename", "a", "b"]).unwrap(),
             Cli::try_parse_from(["cctx", "doctor"]).unwrap(),
             Cli::try_parse_from(["cctx", "doctor", "--dry-run"]).unwrap(),
@@ -323,6 +364,16 @@ mod tests {
         for cli in ok_variants {
             assert!(dispatch(cli).is_ok());
         }
+    }
+
+    #[test]
+    fn dispatch_add_oauth_returns_err_with_p1_message() {
+        let cli = Cli::try_parse_from(["cctx", "add", "x", "--oauth"]).unwrap();
+        let err = dispatch(cli).unwrap_err();
+        assert!(
+            err.to_string().contains("P1"),
+            "expected P1 in error, got: {err}"
+        );
     }
 
     #[test]

@@ -67,14 +67,15 @@ pub fn load_settings(path: &Path) -> Result<Value, Error> {
 
 /// Read back the active API key (or auth token) from `settings.json`.
 ///
-/// Returns `None` when neither `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set.
+/// `path` must be the path to `settings.json` itself (not the parent directory).
+/// Returns `None` when the file is absent, has no `env` block, or neither
+/// `ANTHROPIC_API_KEY` nor `ANTHROPIC_AUTH_TOKEN` is set.
 ///
 /// # Errors
 ///
-/// Propagates `SettingsParseError` or `Io` from [`load_settings`].
-pub fn load_settings_api_key(claude_dir: &Path) -> Result<Option<Secret<String>>, Error> {
-    let path = claude_dir.join("settings.json");
-    let v = load_settings(&path)?;
+/// Returns `SettingsParseError` if the file exists but is malformed JSON.
+pub fn load_settings_api_key(path: &Path) -> Result<Option<Secret<String>>, Error> {
+    let v = load_settings(path)?;
     let env = v.get("env").and_then(Value::as_object);
     if let Some(env) = env {
         if let Some(k) = env.get("ANTHROPIC_API_KEY").and_then(Value::as_str) {
@@ -82,6 +83,29 @@ pub fn load_settings_api_key(claude_dir: &Path) -> Result<Option<Secret<String>>
         }
         if let Some(k) = env.get("ANTHROPIC_AUTH_TOKEN").and_then(Value::as_str) {
             return Ok(Some(Secret::new(k.to_string())));
+        }
+    }
+    Ok(None)
+}
+
+/// Read `ANTHROPIC_BASE_URL` from `settings.json`'s env block, if set.
+///
+/// `path` must be the path to `settings.json` itself (not the parent directory).
+/// Returns `None` when the file is absent, has no `env` block, or the key is absent.
+///
+/// # Errors
+///
+/// Returns `SettingsParseError` if the file is malformed or the URL value cannot
+/// be parsed as a valid URL.
+pub fn load_settings_base_url(path: &Path) -> Result<Option<url::Url>, Error> {
+    let v = load_settings(path)?;
+    let env = v.get("env").and_then(Value::as_object);
+    if let Some(env) = env {
+        if let Some(s) = env.get("ANTHROPIC_BASE_URL").and_then(Value::as_str) {
+            let u = url::Url::parse(s).map_err(|e| Error::SettingsParseError {
+                msg: format!("invalid ANTHROPIC_BASE_URL '{s}': {e}"),
+            })?;
+            return Ok(Some(u));
         }
     }
     Ok(None)
@@ -346,6 +370,58 @@ mod tests {
             raw.contains("    \"ANTHROPIC_API_KEY\":"),
             "expected 4-space indent for inner key, got:\n{raw}"
         );
+    }
+
+    // ── tests: load_settings_api_key ─────────────────────────────────────────
+
+    #[test]
+    fn load_settings_api_key_absent_file() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        // File does not exist → Ok(None)
+        let result = load_settings_api_key(&path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_settings_api_key_no_env_block() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json(&path, r#"{"foo": 1}"#);
+        let result = load_settings_api_key(&path).unwrap();
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn load_settings_api_key_present() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json(&path, r#"{"env": {"ANTHROPIC_API_KEY": "sk-test-key"}}"#);
+        let result = load_settings_api_key(&path).unwrap();
+        assert_eq!(result.unwrap().expose(), "sk-test-key");
+    }
+
+    // ── tests: load_settings_base_url ────────────────────────────────────────
+
+    #[test]
+    fn load_settings_base_url_present() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json(
+            &path,
+            r#"{"env": {"ANTHROPIC_BASE_URL": "https://gateway.example/v1"}}"#,
+        );
+        let result = load_settings_base_url(&path).unwrap();
+        assert_eq!(result.unwrap().as_str(), "https://gateway.example/v1");
+    }
+
+    #[test]
+    fn load_settings_base_url_absent() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("settings.json");
+        write_json(&path, r#"{"env": {"ANTHROPIC_API_KEY": "k"}}"#);
+        let result = load_settings_base_url(&path).unwrap();
+        assert!(result.is_none());
     }
 
     // ── tests 9 + 10: resolve_claude_dir (sequential to avoid env-var race) ──

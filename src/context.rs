@@ -127,6 +127,19 @@ pub enum SecretRef {
 pub struct Fingerprint(pub [u8; 32]);
 
 impl Fingerprint {
+    /// Stub fingerprint for API-key contexts: SHA-256 of the key bytes.
+    ///
+    /// The real OAuth recipe (`SHA-256(userID || ":" || SHA-256(accessToken)[:16])`)
+    /// lands in issue 3.4.
+    #[must_use]
+    pub fn from_api_key(key: &crate::secret::Secret<String>) -> Self {
+        use sha2::{Digest, Sha256};
+        let mut h = Sha256::new();
+        h.update(key.expose().as_bytes());
+        let bytes: [u8; 32] = h.finalize().into();
+        Self(bytes)
+    }
+
     /// Encode as a 64-character lowercase hex string.
     #[must_use]
     pub fn to_hex(&self) -> String {
@@ -398,5 +411,26 @@ mod tests {
         let ctx: Context = serde_yaml_ng::from_str(yaml).unwrap();
         assert_eq!(ctx.name, "personal");
         assert_eq!(ctx.secret_ref, SecretRef::ClaudeCodeKeychain);
+    }
+
+    #[test]
+    fn fingerprint_from_api_key_is_stable() {
+        let key = crate::secret::Secret::new("sk-ant-stable-key".to_string());
+        let fp1 = Fingerprint::from_api_key(&key);
+        let fp2 = Fingerprint::from_api_key(&key);
+        assert_eq!(fp1, fp2, "same key must produce same fingerprint");
+        assert_eq!(fp1.to_hex().len(), 64, "fingerprint must be 64 hex chars");
+    }
+
+    #[test]
+    fn fingerprint_from_api_key_differs_for_different_keys() {
+        let key_a = crate::secret::Secret::new("sk-ant-key-a".to_string());
+        let key_b = crate::secret::Secret::new("sk-ant-key-b".to_string());
+        let fp_a = Fingerprint::from_api_key(&key_a);
+        let fp_b = Fingerprint::from_api_key(&key_b);
+        assert_ne!(
+            fp_a, fp_b,
+            "different keys must produce different fingerprints"
+        );
     }
 }
