@@ -26,9 +26,10 @@
 
 /// The Claude Code version the Phase-0 research spikes and development observed.
 ///
-/// cctx assumes `claude` is at least this version. Adopting a newer version
-/// requires re-running the Phase-0 spikes (0.1 — keychain attrs, 0.2 — userID
-/// rotation, 0.3 — .credentials.json fallback policy) and bumping this pin.
+/// cctx is validated against exactly this Claude Code version. Newer versions
+/// may work but are unvalidated — re-run the Phase-0 spikes (0.1 — keychain
+/// attrs, 0.2 — userID rotation, 0.3 — .credentials.json fallback policy)
+/// and bump this pin before adopting any newer Claude Code release.
 pub const CLAUDE_CODE_PINNED_VERSION: &str = "2.1.114";
 
 pub mod backup;
