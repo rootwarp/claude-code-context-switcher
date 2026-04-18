@@ -1,2 +1,6 @@
 cognitive-complexity-threshold = 25
 too-many-arguments-threshold = 6
+# Placeholder for when secret-wrapping types land (Phase 4, issue 4.1).
+# Future entries will list methods like `Secret::inner()` when we want to
+# force callers to use `.expose()` as the single explicit access point.
+disallowed-methods = []
