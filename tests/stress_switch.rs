@@ -12,6 +12,7 @@ fn cctx(cctx_home: &TempDir, claude_dir: &TempDir) -> Command {
     let mut cmd = Command::cargo_bin("cctx").unwrap();
     cmd.env("CCTX_HOME", cctx_home.path());
     cmd.env("CLAUDE_CONFIG_DIR", claude_dir.path());
+    cmd.env("CCTX_TEST_IN_MEMORY_KEYCHAIN", "1");
     cmd
 }
 

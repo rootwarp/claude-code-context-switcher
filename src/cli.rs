@@ -192,13 +192,20 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
     let cf = config::load(&paths)?;
 
     // Use real Keychain backend when compiled with the real-keychain feature.
-    // Falls back to InMemoryBackend for testing.
+    // Integration tests set CCTX_TEST_IN_MEMORY_KEYCHAIN=1 to force InMemoryBackend
+    // and avoid SecurityAgent dialogs that would deadlock subprocess-based tests.
+    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
     #[cfg(feature = "real-keychain")]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> =
-        Box::new(SecurityFrameworkBackend::new());
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> = if use_in_memory {
+        Box::new(InMemoryBackend::new())
+    } else {
+        Box::new(SecurityFrameworkBackend::new())
+    };
     #[cfg(not(feature = "real-keychain"))]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> =
-        Box::new(InMemoryBackend::new());
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> = {
+        let _ = use_in_memory;
+        Box::new(InMemoryBackend::new())
+    };
 
     let settings_path = claude_state::resolve_settings_path()?;
     let claude_dir = claude_state::resolve_claude_dir()?;
