@@ -3,4 +3,8 @@ name = "claude-code-context-switcher"
 version = "0.1.0"
 edition = "2024"
 
+[[bin]]
+name = "cctx"
+path = "src/main.rs"
+
 [dependencies]
