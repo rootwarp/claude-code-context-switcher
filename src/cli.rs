@@ -1,5 +1,7 @@
 //! Parse argv via clap derive and dispatch to command handlers.
 
+use std::time::Duration;
+
 use clap::{ArgAction, Parser, Subcommand};
 use clap_complete::Shell;
 
@@ -7,7 +9,10 @@ use crate::claude_state;
 use crate::config::{self, ContextsFile};
 use crate::context::{self, AuthMode, Fingerprint, IdentityMetadata, SecretRef};
 use crate::credential_backend::InMemoryBackend;
+use crate::doctor::{self, RepairMode};
+use crate::errors::Error;
 use crate::journal::Journal;
+use crate::lock;
 use crate::switch_engine;
 
 #[derive(Parser, Debug)]
@@ -104,6 +109,17 @@ pub fn render_list(cf: &ContextsFile, active_marker: Option<&str>) -> Vec<String
 
 fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
     let paths = config::resolve_paths()?;
+    ensure_config_dir(&paths)?;
+
+    let pending = check_dirty_journal(&paths)?;
+    if !pending.is_empty() {
+        eprintln!(
+            "warning: {} uncommitted journal entr{} detected; run `cctx doctor` to resolve",
+            pending.len(),
+            if pending.len() == 1 { "y" } else { "ies" }
+        );
+    }
+
     let cf = config::load(&paths)?;
     if cf.contexts.is_empty() {
         eprintln!("no contexts configured. run `cctx add <name>` to create one.");
@@ -132,6 +148,12 @@ fn current_user_short_name() -> String {
 
 fn handle_switch(name: &str) -> anyhow::Result<()> {
     let paths = config::resolve_paths()?;
+    ensure_config_dir(&paths)?;
+    refuse_if_dirty(&paths)?;
+
+    let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let cf = config::load(&paths)?;
 
     // Phase 2: InMemoryBackend only; Phase 3 swaps in SecurityFrameworkBackend.
@@ -180,7 +202,15 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
 }
 
 fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
+    // Capture env-dependent paths at entry before any blocking operations.
+    let settings_path_for_guard = claude_state::resolve_settings_path().ok();
     let paths = config::resolve_paths()?;
+    ensure_config_dir(&paths)?;
+    refuse_if_dirty(&paths)?;
+
+    let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let mut cf = config::load(&paths)?;
 
     if !cf.contexts.contains_key(name) {
@@ -190,8 +220,8 @@ fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
     if !force {
         // Phase-1 heuristic: compare the live settings.json API-key fingerprint to this context.
         // Full active-detection (OAuth, ~/.claude.json) lands in Phase 3.
-        if let Ok(settings_path) = claude_state::resolve_settings_path() {
-            if let Ok(Some(live_key)) = claude_state::load_settings_api_key(&settings_path) {
+        if let Some(settings_path) = settings_path_for_guard.as_ref() {
+            if let Ok(Some(live_key)) = claude_state::load_settings_api_key(settings_path) {
                 let live_fp = Fingerprint::from_api_key(&live_key);
                 if cf.contexts.get(name).map(|c| &c.fingerprint) == Some(&live_fp) {
                     anyhow::bail!(
@@ -223,6 +253,12 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
     }
 
     let paths = config::resolve_paths()?;
+    ensure_config_dir(&paths)?;
+    refuse_if_dirty(&paths)?;
+
+    let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
     let mut cf = config::load(&paths)?;
 
     if cf.contexts.contains_key(name) {
@@ -265,6 +301,136 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
     }
 }
 
+fn handle_rename() {
+    eprintln!("not implemented in v1");
+}
+
+fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<()> {
+    let mode = if dry_run {
+        RepairMode::DryRun
+    } else if rollback {
+        RepairMode::Rollback
+    } else if commit {
+        RepairMode::Commit
+    } else {
+        // Default: dry-run when no flag specified.
+        RepairMode::DryRun
+    };
+
+    let paths = config::resolve_paths()?;
+    ensure_config_dir(&paths)?;
+
+    let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    // For DryRun/Commit we don't need stores; for Rollback we need them.
+    // Phase 2: InMemoryBackend only.
+    let backend = InMemoryBackend::new();
+    let settings_path = claude_state::resolve_settings_path()?;
+    let claude_dir = claude_state::resolve_claude_dir()?;
+    let claude_dot_json_path = claude_dir.parent().map_or_else(
+        || claude_dir.join(".claude.json"),
+        |h| h.join(".claude.json"),
+    );
+
+    let stores = switch_engine::Stores {
+        backend: &backend,
+        keychain_service: "Claude Code-credentials",
+        keychain_account: &current_user_short_name(),
+        claude_dot_json_path: &claude_dot_json_path,
+        settings_json_path: &settings_path,
+    };
+
+    let stores_opt = if mode == RepairMode::Rollback {
+        Some(&stores)
+    } else {
+        None
+    };
+
+    let report = doctor::diagnose_and_repair(&paths, stores_opt, mode)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    if report.uncommitted_entries.is_empty() {
+        eprintln!("journal is clean — no uncommitted entries");
+    } else {
+        eprintln!(
+            "{} uncommitted entr{}:",
+            report.uncommitted_entries.len(),
+            if report.uncommitted_entries.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            }
+        );
+        for entry in &report.uncommitted_entries {
+            eprintln!(
+                "  id={} intent={:?} snapshot={}",
+                entry.id,
+                entry.intent,
+                entry.snapshot_path.display()
+            );
+        }
+    }
+
+    for action in &report.actions_taken {
+        eprintln!("  action: {action}");
+    }
+
+    // Exit 5 if dirty in DryRun mode (caller checks exit code).
+    if mode == RepairMode::DryRun && !report.uncommitted_entries.is_empty() {
+        // Signal dirty state: return an error so main maps to exit 5.
+        return Err(anyhow::anyhow!(
+            "partial state detected: {} uncommitted entr{} — run `cctx doctor --rollback` or `cctx doctor --commit`",
+            report.uncommitted_entries.len(),
+            if report.uncommitted_entries.len() == 1 { "y" } else { "ies" }
+        ));
+    }
+
+    Ok(())
+}
+
+/// Ensure the config directory exists (creates it if missing, mode 0700 on unix).
+fn ensure_config_dir(paths: &config::ConfigPaths) -> anyhow::Result<()> {
+    std::fs::create_dir_all(&paths.config_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "failed to create config dir {}: {e}",
+            paths.config_dir.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::fs::Permissions;
+        use std::os::unix::fs::PermissionsExt as _;
+        std::fs::set_permissions(&paths.config_dir, Permissions::from_mode(0o700))
+            .map_err(|e| anyhow::anyhow!("failed to set config dir permissions: {e}"))?;
+    }
+    Ok(())
+}
+
+/// Check journal for uncommitted entries. Returns the list (may be empty).
+fn check_dirty_journal(
+    paths: &config::ConfigPaths,
+) -> anyhow::Result<Vec<crate::journal::JournalEntry>> {
+    let journal = Journal::open(&paths.journal_file)?;
+    Ok(journal.find_uncommitted()?)
+}
+
+/// Refuse to proceed if there are uncommitted journal entries.
+///
+/// Prints a helpful message and returns `Error::PartiallyAppliedState` for the first
+/// uncommitted entry found.
+fn refuse_if_dirty(paths: &config::ConfigPaths) -> anyhow::Result<()> {
+    let pending = check_dirty_journal(paths)?;
+    if let Some(first) = pending.first() {
+        let err = Error::PartiallyAppliedState {
+            journal_id: first.id,
+            snapshot_path: first.snapshot_path.clone(),
+        };
+        return Err(anyhow::anyhow!("{err}"));
+    }
+    Ok(())
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match (cli.cmd, cli.name, cli.current) {
@@ -273,12 +439,22 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         (Some(Command::Switch { name }), _, _) | (None, Some(name), false) => handle_switch(&name),
         (Some(Command::Add { name, oauth }), _, _) => handle_add(&name, oauth),
         (Some(Command::Delete { name, force }), _, _) => handle_delete(&name, force),
+        (Some(Command::Rename { .. }), _, _) => {
+            handle_rename();
+            Ok(())
+        }
         (
-            Some(Command::Rename { .. } | Command::Doctor { .. } | Command::Completions { .. }),
+            Some(Command::Doctor {
+                dry_run,
+                rollback,
+                commit,
+            }),
             _,
             _,
-        ) => {
-            eprintln!("not implemented in v1");
+        ) => handle_doctor(dry_run, rollback, commit),
+        (Some(Command::Completions { shell }), _, _) => {
+            use clap::CommandFactory as _;
+            clap_complete::generate(shell, &mut Cli::command(), "cctx", &mut std::io::stdout());
             Ok(())
         }
     }
@@ -400,20 +576,6 @@ mod tests {
         assert!(
             matches!(cli.cmd, Some(Command::Rename { old, new }) if old == "old" && new == "new")
         );
-    }
-
-    #[test]
-    fn dispatch_ok_variants() {
-        // Variants that return Ok (non-mutating stubs or no-ops).
-        let ok_variants: Vec<Cli> = vec![
-            Cli::try_parse_from(["cctx", "rename", "a", "b"]).unwrap(),
-            Cli::try_parse_from(["cctx", "doctor"]).unwrap(),
-            Cli::try_parse_from(["cctx", "doctor", "--dry-run"]).unwrap(),
-            Cli::try_parse_from(["cctx", "completions", "zsh"]).unwrap(),
-        ];
-        for cli in ok_variants {
-            assert!(dispatch(cli).is_ok());
-        }
     }
 
     #[test]

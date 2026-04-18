@@ -29,9 +29,12 @@ fn main() {
         Ok(()) => {}
         Err(e) => {
             eprintln!("error: {e:#}");
-            // Exit code 3 for "not implemented" stub errors; full mapping in issue 4.4.
-            let code = if format!("{e:#}").contains("not implemented") {
+            let msg = format!("{e:#}");
+            // Full exit-code taxonomy lands in issue 4.4; string-match bridge for now.
+            let code = if msg.contains("not implemented") {
                 3
+            } else if msg.contains("partial state") || msg.contains("another cctx process") {
+                5
             } else {
                 1
             };

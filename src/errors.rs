@@ -125,4 +125,17 @@ pub enum Error {
         attempted_stores: Vec<crate::journal::Store>,
         path: PathBuf,
     },
+
+    /// Another cctx process holds the advisory lock.
+    #[error("another cctx process holds the lock")]
+    ConcurrentAccess,
+
+    /// A mutating command was refused because the journal has uncommitted entries.
+    #[error(
+        "partial state detected; run `cctx doctor` (journal_id={journal_id}, snapshot={snapshot_path:?})"
+    )]
+    PartiallyAppliedState {
+        journal_id: u64,
+        snapshot_path: PathBuf,
+    },
 }
