@@ -238,7 +238,7 @@ mod tests {
             None,
             Some("ctx".to_string()),
             sample_planned_ops(),
-            snap_path.clone(),
+            snap_path,
         )
         .unwrap();
 
