@@ -92,4 +92,26 @@ pub enum Error {
         #[source]
         source: std::io::Error,
     },
+
+    /// A snapshot file could not be written atomically.
+    #[error("snapshot write failed: {source}")]
+    SnapshotWriteFailed {
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A snapshot file could not be read.
+    #[error("snapshot read failed: {source}")]
+    SnapshotReadFailed {
+        #[source]
+        source: std::io::Error,
+    },
+
+    /// A snapshot file could not be parsed as valid JSON.
+    #[error("snapshot parse failed at {path}: {msg}")]
+    SnapshotParseError { path: PathBuf, msg: String },
+
+    /// The hex-encoded keychain blob in a snapshot file is malformed.
+    #[error("invalid hex in snapshot keychain blob: {msg}")]
+    SnapshotInvalidHex { msg: String },
 }
