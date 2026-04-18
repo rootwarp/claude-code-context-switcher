@@ -162,6 +162,41 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
     }
 }
 
+fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
+    let paths = config::resolve_paths()?;
+    let mut cf = config::load(&paths)?;
+
+    if !cf.contexts.contains_key(name) {
+        anyhow::bail!("context not found: {name}");
+    }
+
+    if !force {
+        // Phase-1 heuristic: compare the live settings.json API-key fingerprint to this context.
+        // Full active-detection (OAuth, ~/.claude.json) lands in Phase 3.
+        if let Ok(settings_path) = claude_state::resolve_settings_path() {
+            if let Ok(Some(live_key)) = claude_state::load_settings_api_key(&settings_path) {
+                let live_fp = Fingerprint::from_api_key(&live_key);
+                if cf.contexts.get(name).map(|c| &c.fingerprint) == Some(&live_fp) {
+                    anyhow::bail!(
+                        "refusing to delete {name}: this context appears to be the currently-active \
+                         identity. use --force to override."
+                    );
+                }
+            }
+        }
+    }
+
+    // Phase 3: sweep cctx-owned Keychain items here.
+    // For Phase 1 this is a documented no-op stub.
+    // TODO(phase-3): credential_backend::enumerate_by_service_prefix(&format!("cctx-context-{name}"))
+    //                then delete each returned ItemHandle.
+
+    cf.contexts.shift_remove(name);
+    config::save(&paths, &cf)?;
+    eprintln!("deleted {name}");
+    Ok(())
+}
+
 fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
     if oauth {
         anyhow::bail!(
@@ -220,9 +255,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<()> {
         (None, _, true) | (Some(Command::Current), _, _) => handle_current(),
         (Some(Command::Switch { name }), _, _) | (None, Some(name), false) => handle_switch(&name),
         (Some(Command::Add { name, oauth }), _, _) => handle_add(&name, oauth),
-        (Some(Command::Delete { .. }), _, _) => {
-            anyhow::bail!("delete not implemented yet (issue 1.7)")
-        }
+        (Some(Command::Delete { name, force }), _, _) => handle_delete(&name, force),
         (
             Some(Command::Rename { .. } | Command::Doctor { .. } | Command::Completions { .. }),
             _,
@@ -417,5 +450,95 @@ mod tests {
         let cf = make_contexts_file(&[]);
         let lines = render_list(&cf, None);
         assert!(lines.is_empty());
+    }
+
+    // ── handle_delete unit tests ──────────────────────────────────────────────
+
+    fn make_contexts_file_with_key(name: &str, api_key: &str) -> ContextsFile {
+        let key = Secret::new(api_key.to_string());
+        let fp = Fingerprint::from_api_key(&key);
+        let mut contexts = IndexMap::new();
+        contexts.insert(
+            name.to_string(),
+            Context {
+                name: name.to_string(),
+                auth_mode: AuthMode::ApiKey { base_url: None },
+                identity: IdentityMetadata::default(),
+                fingerprint: fp,
+                created_at: chrono::DateTime::UNIX_EPOCH,
+                secret_ref: SecretRef::Plaintext { value: key },
+            },
+        );
+        ContextsFile {
+            version: 1,
+            contexts,
+        }
+    }
+
+    fn write_contexts_file(dir: &std::path::Path, cf: &ContextsFile) {
+        let yaml = serde_yaml_ng::to_string(cf).unwrap();
+        std::fs::write(dir.join("contexts.yaml"), yaml).unwrap();
+    }
+
+    fn write_settings_json(dir: &std::path::Path, api_key: &str) {
+        let json = format!(r#"{{"env":{{"ANTHROPIC_API_KEY":"{api_key}"}}}}"#);
+        std::fs::write(dir.join("settings.json"), json).unwrap();
+    }
+
+    #[test]
+    fn handle_delete_unknown_context_errors() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let cf = make_contexts_file(&["alpha"]);
+        write_contexts_file(tmp.path(), &cf);
+        std::env::set_var("CCTX_HOME", tmp.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", tmp.path());
+
+        let err = handle_delete("nosuch", false).unwrap_err();
+        assert!(
+            err.to_string().contains("context not found: nosuch"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn handle_delete_active_heuristic_blocks_without_force() {
+        let cctx_tmp = tempfile::TempDir::new().unwrap();
+        let claude_tmp = tempfile::TempDir::new().unwrap();
+
+        let api_key = "sk-ant-unit-test-active-key";
+        let cf = make_contexts_file_with_key("myctx", api_key);
+        write_contexts_file(cctx_tmp.path(), &cf);
+        write_settings_json(claude_tmp.path(), api_key);
+
+        std::env::set_var("CCTX_HOME", cctx_tmp.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_tmp.path());
+
+        let err = handle_delete("myctx", false).unwrap_err();
+        assert!(
+            err.to_string().contains("--force"),
+            "expected --force mention, got: {err}"
+        );
+    }
+
+    #[test]
+    fn handle_delete_active_heuristic_bypassed_with_force() {
+        let cctx_tmp = tempfile::TempDir::new().unwrap();
+        let claude_tmp = tempfile::TempDir::new().unwrap();
+
+        let api_key = "sk-ant-unit-test-force-key";
+        let cf = make_contexts_file_with_key("myctx", api_key);
+        write_contexts_file(cctx_tmp.path(), &cf);
+        write_settings_json(claude_tmp.path(), api_key);
+
+        std::env::set_var("CCTX_HOME", cctx_tmp.path());
+        std::env::set_var("CLAUDE_CONFIG_DIR", claude_tmp.path());
+
+        handle_delete("myctx", true).unwrap();
+
+        // Verify context is gone
+        std::env::set_var("CCTX_HOME", cctx_tmp.path());
+        let paths = config::resolve_paths().unwrap();
+        let loaded = config::load(&paths).unwrap();
+        assert!(!loaded.contexts.contains_key("myctx"));
     }
 }
