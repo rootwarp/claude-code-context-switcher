@@ -66,4 +66,11 @@ pub enum Error {
     /// A generic I/O error not covered by a more specific variant.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+
+    /// A credential-backend error surfaced to upstream callers.
+    #[error("keychain backend: {source}")]
+    KeychainBackend {
+        #[from]
+        source: crate::credential_backend::BackendError,
+    },
 }
