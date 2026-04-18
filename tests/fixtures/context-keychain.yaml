@@ -1,6 +1,7 @@
 name: console-key
-auth_mode: !api_key
-  base_url: null
+auth_mode:
+  api_key:
+    base_url: null
 identity:
   label: "Console key (personal)"
 fingerprint: "c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1c1"

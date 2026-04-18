@@ -25,17 +25,58 @@ pub struct Context {
 }
 
 /// Whether this context uses Claude Code OAuth or a raw API key.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// Serializes to/from the arch §4 YAML schema:
+/// - `OAuth`  → `oauth` (plain string)
+/// - `ApiKey` → `api_key: { base_url: <url|null> }` (nested map)
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(into = "AuthModeWire", try_from = "AuthModeWire")]
 pub enum AuthMode {
     /// Claude Code OAuth — credential lives in the `Claude Code-credentials` Keychain item.
-    #[serde(rename = "oauth")]
     OAuth,
     /// Raw API key, optionally with a custom base URL for gateway users.
-    #[serde(rename = "api_key")]
     ApiKey {
         /// Optional override for `ANTHROPIC_BASE_URL`.
         base_url: Option<Url>,
     },
+}
+
+// ---- wire types for arch §4 YAML format ----
+
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+enum AuthModeWire {
+    Simple(String),
+    ApiKey { api_key: ApiKeyBody },
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct ApiKeyBody {
+    base_url: Option<Url>,
+}
+
+impl From<AuthMode> for AuthModeWire {
+    fn from(m: AuthMode) -> Self {
+        match m {
+            AuthMode::OAuth => Self::Simple("oauth".into()),
+            AuthMode::ApiKey { base_url } => Self::ApiKey {
+                api_key: ApiKeyBody { base_url },
+            },
+        }
+    }
+}
+
+impl TryFrom<AuthModeWire> for AuthMode {
+    type Error = String;
+    fn try_from(w: AuthModeWire) -> Result<Self, Self::Error> {
+        match w {
+            AuthModeWire::Simple(s) if s == "oauth" => Ok(Self::OAuth),
+            AuthModeWire::Simple(s) => Err(format!("unknown auth_mode variant: {s}")),
+            AuthModeWire::ApiKey { api_key } => Ok(Self::ApiKey {
+                base_url: api_key.base_url,
+            }),
+        }
+    }
 }
 
 /// Identity metadata stored alongside a context for display and matching.
@@ -190,6 +231,12 @@ mod tests {
     fn serde_roundtrip_oauth_context() {
         let ctx = oauth_context();
         let yaml = serde_yaml_ng::to_string(&ctx).unwrap();
+        // Verify arch §4 plain-string format (no YAML tags)
+        assert!(
+            yaml.contains("auth_mode: oauth"),
+            "expected plain 'oauth', got: {yaml}"
+        );
+        assert!(!yaml.contains("!oauth"), "must not emit YAML tag: {yaml}");
         let back: Context = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(ctx, back);
     }
@@ -199,6 +246,12 @@ mod tests {
         let url = Url::parse("https://gateway.example/v1").unwrap();
         let ctx = api_key_context(Some(url));
         let yaml = serde_yaml_ng::to_string(&ctx).unwrap();
+        // Verify arch §4 nested-map format (no YAML tags)
+        assert!(
+            yaml.contains("api_key:"),
+            "expected nested map, got: {yaml}"
+        );
+        assert!(!yaml.contains("!api_key"), "must not emit YAML tag: {yaml}");
         let back: Context = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(ctx, back);
     }
@@ -207,6 +260,11 @@ mod tests {
     fn serde_roundtrip_api_key_no_base_url() {
         let ctx = api_key_context(None);
         let yaml = serde_yaml_ng::to_string(&ctx).unwrap();
+        assert!(
+            yaml.contains("api_key:"),
+            "expected nested map, got: {yaml}"
+        );
+        assert!(!yaml.contains("!api_key"), "must not emit YAML tag: {yaml}");
         let back: Context = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(ctx, back);
     }
@@ -263,39 +321,35 @@ mod tests {
 
     #[test]
     fn roundtrip_plaintext_variant() {
-        let ctx = Context {
-            name: "demo".to_string(),
-            auth_mode: AuthMode::ApiKey { base_url: None },
-            identity: IdentityMetadata {
-                label: Some("Demo".to_string()),
-                ..Default::default()
-            },
-            fingerprint: Fingerprint([0u8; 32]),
-            created_at: fixed_ts(),
-            secret_ref: SecretRef::Plaintext {
-                value: Secret::new("sk-ant-demo".to_string()),
-            },
-        };
-        let yaml = serde_yaml_ng::to_string(&ctx).unwrap();
-        let back: Context = serde_yaml_ng::from_str(&yaml).unwrap();
+        // AC: load fixture YAML, parse to Context, serialize back, assert equality
+        let fixture = include_str!("../tests/fixtures/context-plaintext.yaml");
+        let ctx: Context = serde_yaml_ng::from_str(fixture).unwrap();
+        assert!(matches!(ctx.secret_ref, SecretRef::Plaintext { .. }));
+        let reserialized = serde_yaml_ng::to_string(&ctx).unwrap();
+        let back: Context = serde_yaml_ng::from_str(&reserialized).unwrap();
         assert_eq!(ctx, back);
     }
 
     #[test]
     fn roundtrip_keychain_variant() {
-        let ctx = api_key_context(None);
-        let yaml = serde_yaml_ng::to_string(&ctx).unwrap();
-        let back: Context = serde_yaml_ng::from_str(&yaml).unwrap();
+        // AC: load fixture YAML, parse to Context, serialize back, assert equality
+        let fixture = include_str!("../tests/fixtures/context-keychain.yaml");
+        let ctx: Context = serde_yaml_ng::from_str(fixture).unwrap();
+        assert!(matches!(ctx.secret_ref, SecretRef::Keychain { .. }));
+        let reserialized = serde_yaml_ng::to_string(&ctx).unwrap();
+        let back: Context = serde_yaml_ng::from_str(&reserialized).unwrap();
         assert_eq!(ctx, back);
     }
 
     #[test]
     fn roundtrip_claude_code_keychain_variant() {
-        let ctx = oauth_context();
-        let yaml = serde_yaml_ng::to_string(&ctx).unwrap();
-        let back: Context = serde_yaml_ng::from_str(&yaml).unwrap();
-        assert_eq!(ctx, back);
+        // AC: load fixture YAML, parse to Context, serialize back, assert equality
+        let fixture = include_str!("../tests/fixtures/context-claude_code_keychain.yaml");
+        let ctx: Context = serde_yaml_ng::from_str(fixture).unwrap();
         assert_eq!(ctx.secret_ref, SecretRef::ClaudeCodeKeychain);
+        let reserialized = serde_yaml_ng::to_string(&ctx).unwrap();
+        let back: Context = serde_yaml_ng::from_str(&reserialized).unwrap();
+        assert_eq!(ctx, back);
     }
 
     #[test]
