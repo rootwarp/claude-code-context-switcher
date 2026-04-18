@@ -1,0 +1,6 @@
+edition = "2021"
+max_width = 100
+newline_style = "Unix"
+use_small_heuristics = "Default"
+# `imports_granularity` and `group_imports` are nightly-only rustfmt options;
+# omitted here so `cargo fmt` works on the stable toolchain.

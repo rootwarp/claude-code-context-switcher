@@ -1,8 +1,11 @@
 #![warn(clippy::pedantic, clippy::nursery)]
+// Secrets must never panic: .unwrap()/.expect()/panic!() can embed credential
+// data in the panic message. Override per-site with #[allow(...)] when
+// necessary (e.g. in tests or truly-infallible cases).
+#![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 /// The Claude Code version this cctx build is known to interoperate with.
 /// Issue 0.7 will set the real observed value from `claude --version`.
-#[allow(dead_code)]
 pub const CLAUDE_CODE_PINNED_VERSION: &str = "UNPINNED";
 
 pub mod backup;
