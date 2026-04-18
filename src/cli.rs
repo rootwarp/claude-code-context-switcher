@@ -111,29 +111,9 @@ pub fn render_list(cf: &ContextsFile, active_marker: Option<&str>) -> Vec<String
 /// `.credentials.json` fallback is detected (research 05 §2, verbatim).
 #[must_use]
 pub fn format_credentials_json_fallback_help(path: &std::path::Path) -> String {
-    format!(
-        "cctx: refusing to switch — a credentials fallback file exists on this macOS\n\
-machine, which means Claude Code is NOT reading OAuth from the Keychain. cctx\n\
-only manages the Keychain-backed flow on macOS.\n\
-\n\
-  Fallback file: {path}\n\
-\n\
-This usually means one of:\n\
-  \u{2022} $CLAUDE_CONFIG_DIR is set, directing Claude Code to a custom root.\n\
-  \u{2022} An SSH session with a locked Keychain forced Claude Code to the file\n\
-    fallback.\n\
-  \u{2022} A prior export of CLAUDE_CODE_OAUTH_TOKEN triggered upstream bug #37512,\n\
-    which silently purges the Keychain entry on child-process exit.\n\
-\n\
-Resolve by:\n\
-  1. unset CLAUDE_CONFIG_DIR                                (if set)\n\
-  2. rm {path}\n\
-  3. claude /login                                          (repopulates Keychain)\n\
-  4. retry cctx\n\
-\n\
-See: https://github.com/anthropics/claude-code/issues/37512",
-        path = path.display()
-    )
+    let p = path.display();
+    // Inline the template without `\` continuation so leading spaces are preserved verbatim.
+    format!("cctx: refusing to switch \u{2014} a credentials fallback file exists on this macOS\nmachine, which means Claude Code is NOT reading OAuth from the Keychain. cctx\nonly manages the Keychain-backed flow on macOS.\n\n  Fallback file: {p}\n\nThis usually means one of:\n  \u{2022} $CLAUDE_CONFIG_DIR is set, directing Claude Code to a custom root.\n  \u{2022} An SSH session with a locked Keychain forced Claude Code to the file\n    fallback.\n  \u{2022} A prior export of CLAUDE_CODE_OAUTH_TOKEN triggered upstream bug #37512,\n    which silently purges the Keychain entry on child-process exit.\n\nResolve by:\n  1. unset CLAUDE_CONFIG_DIR                                (if set)\n  2. rm {p}\n  3. claude /login                                          (repopulates Keychain)\n  4. retry cctx\n\nSee: https://github.com/anthropics/claude-code/issues/37512")
 }
 
 fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
