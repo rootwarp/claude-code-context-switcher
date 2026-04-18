@@ -29,16 +29,27 @@ fn hex_encode(bytes: &[u8]) -> String {
 }
 
 fn hex_decode(s: &str) -> Result<Vec<u8>, Error> {
+    if !s.is_ascii() {
+        return Err(Error::SnapshotInvalidHex {
+            msg: "non-ASCII character in hex string".to_owned(),
+        });
+    }
     if s.len() % 2 != 0 {
         return Err(Error::SnapshotInvalidHex {
             msg: format!("odd-length hex string ({} chars)", s.len()),
         });
     }
-    (0..s.len())
-        .step_by(2)
-        .map(|i| {
-            u8::from_str_radix(&s[i..i + 2], 16).map_err(|e| Error::SnapshotInvalidHex {
-                msg: format!("at offset {i}: {e}"),
+    s.as_bytes()
+        .chunks(2)
+        .enumerate()
+        .map(|(i, pair)| {
+            // SAFETY: is_ascii check above ensures both bytes are ASCII and
+            // from_str_radix is infallible for valid hex digits.
+            let nibbles = std::str::from_utf8(pair).map_err(|e| Error::SnapshotInvalidHex {
+                msg: format!("at byte {}: {e}", i * 2),
+            })?;
+            u8::from_str_radix(nibbles, 16).map_err(|e| Error::SnapshotInvalidHex {
+                msg: format!("at offset {}: {e}", i * 2),
             })
         })
         .collect()
@@ -238,7 +249,6 @@ fn restore_file(path: &Path, value: Option<&serde_json::Value>) -> Result<(), Er
             write_atomic_0600(path, &bytes).map_err(extract_snapshot_write_err)
         }
         None => match fs::remove_file(path) {
-            Ok(()) | Err(_) if !path.exists() => Ok(()),
             Ok(()) => Ok(()),
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(Error::SnapshotWriteFailed { source: e }),
@@ -507,6 +517,83 @@ mod tests {
         assert!(
             matches!(err, Error::SnapshotInvalidHex { .. }),
             "expected SnapshotInvalidHex, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn restore_with_none_claude_json_deletes_existing_file() {
+        let dir = tempdir().unwrap();
+        let backend = InMemoryBackend::new();
+        let claude_json = dir.path().join("claude.json");
+        let settings = dir.path().join("settings.json");
+        fs::write(&claude_json, r#"{"userId":"u1"}"#).unwrap();
+
+        let snap = Snapshot {
+            keychain_blob: None,
+            claude_dot_json: None,
+            settings_json: None,
+            taken_at: Utc::now(),
+        };
+        restore_snapshot(&snap, &backend, SVC, ACC, &claude_json, &settings).unwrap();
+        assert!(
+            !claude_json.exists(),
+            "claude.json should have been deleted"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_rejects_non_ascii_hex() {
+        let dir = tempdir().unwrap();
+        // "日日" is non-ASCII; 6 bytes but invalid hex
+        let bad_json = serde_json::json!({
+            "taken_at": "2026-04-19T00:00:00Z",
+            "keychain_blob_hex": "日日",
+            "claude_dot_json": null,
+            "settings_json": null
+        });
+        let path = dir.path().join("non_ascii.json");
+        fs::write(&path, serde_json::to_vec(&bad_json).unwrap()).unwrap();
+
+        let err = load_snapshot(&path).unwrap_err();
+        assert!(
+            matches!(err, Error::SnapshotInvalidHex { .. }),
+            "expected SnapshotInvalidHex, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn load_snapshot_with_corrupt_json_returns_parse_error() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("corrupt.json");
+        fs::write(&path, b"not valid json {{{").unwrap();
+
+        let err = load_snapshot(&path).unwrap_err();
+        assert!(
+            matches!(err, Error::SnapshotParseError { .. }),
+            "expected SnapshotParseError, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn capture_with_invalid_json_path_returns_parse_error() {
+        let dir = tempdir().unwrap();
+        let backend = InMemoryBackend::new();
+        let bad_claude_json = dir.path().join("bad_claude.json");
+        fs::write(&bad_claude_json, b"not json!!!").unwrap();
+        let out = dir.path().join("snap.json");
+
+        let err = capture_snapshot(
+            &backend,
+            SVC,
+            ACC,
+            &bad_claude_json,
+            &dir.path().join("absent_settings.json"),
+            &out,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, Error::SnapshotParseError { .. }),
+            "expected SnapshotParseError, got: {err:?}"
         );
     }
 }
