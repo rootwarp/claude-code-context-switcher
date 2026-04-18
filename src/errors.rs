@@ -59,6 +59,10 @@ pub enum Error {
     #[error("json: {0}")]
     Json(#[from] serde_json::Error),
 
+    /// `~/.claude.json` could not be parsed.
+    #[error("failed to parse ~/.claude.json: {msg}")]
+    ClaudeStateParseError { msg: String },
+
     /// A not-yet-implemented path (deferred to a later phase).
     #[error("not implemented in v1: {what}")]
     Unimplemented { what: &'static str },

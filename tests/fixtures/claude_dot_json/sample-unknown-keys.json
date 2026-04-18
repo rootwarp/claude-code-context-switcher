@@ -1,0 +1,16 @@
+{
+  "oauthAccount": {
+    "accountUuid": "aaaaaaaa-0000-0000-0000-000000000001",
+    "emailAddress": "old@example.com",
+    "organizationUuid": null
+  },
+  "userID": "old-user-id",
+  "numStartups": 3,
+  "futureFeature": {
+    "enabled": true,
+    "config": {
+      "threshold": 42
+    }
+  },
+  "anotherUnknownKey": "some-value"
+}

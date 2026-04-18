@@ -1,0 +1,8 @@
+{
+  "oauthAccount": {
+    "accountUuid": "aaaaaaaa-0000-0000-0000-000000000001",
+    "emailAddress": "old@example.com",
+    "organizationUuid": null
+  },
+  "userID": "old-user-id"
+}

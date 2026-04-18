@@ -1,0 +1,41 @@
+{
+  "oauthAccount": {
+    "accountUuid": "aaaaaaaa-1111-1111-1111-aaaaaaaaaaaa",
+    "emailAddress": "old-user@example.com",
+    "organizationUuid": "bbbbbbbb-2222-2222-2222-bbbbbbbbbbbb",
+    "hasExtraUsageEnabled": true,
+    "billingType": "stripe_subscription",
+    "accountCreatedAt": "2024-01-01T00:00:00.000Z",
+    "subscriptionCreatedAt": "2024-01-02T00:00:00.000Z",
+    "displayName": "Old User",
+    "organizationRole": "owner",
+    "workspaceRole": null,
+    "organizationName": "Old Org"
+  },
+  "userID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "firstStartTime": "2024-01-01T00:00:00.000Z",
+  "claudeCodeFirstTokenDate": "2024-01-01T00:00:00.000Z",
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.0.0",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "migrationVersion": 3,
+  "unpinOpus47LaunchEffort": true,
+  "cachedChromeExtensionInstalled": false,
+  "cachedGrowthBookFeatures": {
+    "feature-a": true,
+    "feature-b": false
+  },
+  "changelogLastFetched": "2024-06-01T00:00:00.000Z",
+  "projects": {
+    "/Users/redacted/project-a": {
+      "allowedTools": [],
+      "mcpServers": {}
+    }
+  },
+  "tipsHistory": {
+    "tip-1": true
+  },
+  "numStartups": 42,
+  "promptQueueUseCount": 7
+}

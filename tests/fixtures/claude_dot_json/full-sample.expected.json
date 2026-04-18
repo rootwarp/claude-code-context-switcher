@@ -1,0 +1,39 @@
+{
+  "firstStartTime": "2024-01-01T00:00:00.000Z",
+  "claudeCodeFirstTokenDate": "2024-01-01T00:00:00.000Z",
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "2.0.0",
+  "opusProMigrationComplete": true,
+  "sonnet1m45MigrationComplete": true,
+  "migrationVersion": 3,
+  "unpinOpus47LaunchEffort": true,
+  "cachedChromeExtensionInstalled": false,
+  "cachedGrowthBookFeatures": {
+    "feature-a": true,
+    "feature-b": false
+  },
+  "changelogLastFetched": "2024-06-01T00:00:00.000Z",
+  "projects": {
+    "/Users/redacted/project-a": {
+      "allowedTools": [],
+      "mcpServers": {}
+    }
+  },
+  "tipsHistory": {
+    "tip-1": true
+  },
+  "numStartups": 42,
+  "promptQueueUseCount": 7,
+  "oauthAccount": {
+    "accountUuid": "cccccccc-3333-3333-3333-cccccccccccc",
+    "emailAddress": "new-user@example.com",
+    "organizationUuid": "dddddddd-4444-4444-4444-dddddddddddd",
+    "hasExtraUsageEnabled": false,
+    "billingType": "free",
+    "displayName": "New User",
+    "organizationRole": "member",
+    "workspaceRole": null,
+    "organizationName": "New Org"
+  },
+  "userID": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+}

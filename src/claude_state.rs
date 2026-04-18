@@ -3,11 +3,133 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-use serde_json::Value;
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value};
 
 use crate::errors::Error;
 use crate::fs_atomic::write_atomic_0600;
 use crate::secret::Secret;
+
+// ── ~/.claude.json types ────────────────────────────────────────────────────
+
+/// Dual-form parser for `expiresAt` (research 01 §1, issue #19274).
+///
+/// Accepts either a millisecond-since-epoch integer or an ISO-8601 string.
+/// Write-back preserves whatever form was read.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(untagged)]
+pub enum ExpiresAt {
+    Millis(i64),
+    Iso(String),
+}
+
+/// The `claudeAiOauth` payload stored in the Keychain blob.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ClaudeAiOauth {
+    #[serde(rename = "accessToken")]
+    pub access_token: Secret<String>,
+    #[serde(rename = "refreshToken")]
+    pub refresh_token: Secret<String>,
+    #[serde(rename = "expiresAt")]
+    pub expires_at: ExpiresAt,
+}
+
+/// Wrapper matching the Keychain blob's top-level shape.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KeychainBlobEnvelope {
+    #[serde(rename = "claudeAiOauth")]
+    pub claude_ai_oauth: ClaudeAiOauth,
+}
+
+/// Non-secret identity block stored in `~/.claude.json` under `oauthAccount`.
+///
+/// Per research 01 §2. The `#[serde(flatten)]` captures all fields Claude Code
+/// may add across versions, ensuring round-trip fidelity without a hardcoded list.
+// `serde_json::Map<String, Value>` implements `PartialEq` but not `Eq` (Value contains f64).
+#[allow(clippy::derive_partial_eq_without_eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct OAuthAccount {
+    #[serde(rename = "accountUuid")]
+    pub account_uuid: String,
+    #[serde(rename = "emailAddress")]
+    pub email_address: String,
+    #[serde(rename = "organizationUuid")]
+    pub organization_uuid: Option<String>,
+    #[serde(flatten)]
+    pub other: Map<String, Value>,
+}
+
+/// Parsed view of `~/.claude.json`.
+///
+/// `oauth_account` and `user_id` are the only fields cctx writes;
+/// `preserved` holds every other top-level key opaquely for round-trip.
+#[derive(Debug, Clone)]
+pub struct ClaudeDotJson {
+    pub oauth_account: Option<OAuthAccount>,
+    pub user_id: Option<String>,
+    pub preserved: Map<String, Value>,
+}
+
+/// Load `~/.claude.json`. If the file is missing, returns an empty state.
+///
+/// # Errors
+///
+/// `ClaudeStateParseError` if the file exists but is not valid JSON.
+pub fn load_claude_dot_json(path: &Path) -> Result<ClaudeDotJson, Error> {
+    if !path.exists() {
+        return Ok(ClaudeDotJson {
+            oauth_account: None,
+            user_id: None,
+            preserved: Map::new(),
+        });
+    }
+    let raw = std::fs::read(path)?;
+    let mut root: Map<String, Value> = serde_json::from_slice(&raw)
+        .map_err(|e| Error::ClaudeStateParseError { msg: e.to_string() })?;
+
+    let oauth_account = root
+        .remove("oauthAccount")
+        .and_then(|v| serde_json::from_value(v).ok());
+
+    let user_id = root
+        .remove("userID")
+        .and_then(|v| v.as_str().map(String::from));
+
+    Ok(ClaudeDotJson {
+        oauth_account,
+        user_id,
+        preserved: root,
+    })
+}
+
+/// Merge an incoming identity into `~/.claude.json` atomically (mode 0600 on unix).
+///
+/// Writes `oauthAccount` and `userID` at the top level. Every other top-level key
+/// (`projects`, `tipsHistory`, `numStartups`, migration flags, unknown future keys, etc.)
+/// is preserved verbatim from the existing file.
+///
+/// # Errors
+///
+/// `ClaudeStateParseError`, `ConfigWriteFailed`.
+pub fn merge_and_save_claude_dot_json(
+    path: &Path,
+    incoming_oauth_account: &OAuthAccount,
+    incoming_user_id: String,
+) -> Result<(), Error> {
+    let current = load_claude_dot_json(path)?;
+
+    let mut out: Map<String, Value> = current.preserved;
+
+    out.insert(
+        "oauthAccount".to_string(),
+        serde_json::to_value(incoming_oauth_account)?,
+    );
+    out.insert("userID".to_string(), Value::String(incoming_user_id));
+
+    let bytes = serde_json::to_vec_pretty(&Value::Object(out))?;
+    write_atomic_0600(path, &bytes)?;
+    Ok(())
+}
 
 /// Lightweight indicator of which auth mode is being applied.
 ///
@@ -477,5 +599,210 @@ mod tests {
                 default.display()
             );
         }
+    }
+
+    // ── claude.json tests ────────────────────────────────────────────────────
+
+    fn sample_oauth_account() -> OAuthAccount {
+        OAuthAccount {
+            account_uuid: "aaaaaaaa-0000-0000-0000-000000000001".to_string(),
+            email_address: "test@example.com".to_string(),
+            organization_uuid: Some("bbbbbbbb-0000-0000-0000-000000000002".to_string()),
+            other: Map::new(),
+        }
+    }
+
+    // ── test 11 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn load_missing_file_returns_empty() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        let result = load_claude_dot_json(&path).unwrap();
+        assert!(result.oauth_account.is_none());
+        assert!(result.user_id.is_none());
+        assert!(result.preserved.is_empty());
+    }
+
+    // ── test 12 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn load_preserves_unknown_top_level_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        write_json(&path, r#"{"foo": 1, "bar": {"nested": true}}"#);
+        let result = load_claude_dot_json(&path).unwrap();
+        assert_eq!(result.preserved["foo"], 1);
+        assert_eq!(result.preserved["bar"]["nested"], true);
+    }
+
+    // ── test 13 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn load_parses_oauth_account() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        write_json(
+            &path,
+            r#"{"oauthAccount": {"accountUuid": "u1", "emailAddress": "a@b.com", "organizationUuid": null}}"#,
+        );
+        let result = load_claude_dot_json(&path).unwrap();
+        let oa = result.oauth_account.unwrap();
+        assert_eq!(oa.account_uuid, "u1");
+        assert_eq!(oa.email_address, "a@b.com");
+    }
+
+    // ── test 14 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn load_parses_user_id_string() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        write_json(&path, r#"{"userID": "deadbeefcafe"}"#);
+        let result = load_claude_dot_json(&path).unwrap();
+        assert_eq!(result.user_id.unwrap(), "deadbeefcafe");
+    }
+
+    // ── test 15 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn merge_preserves_existing_preserved_keys() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        write_json(&path, r#"{"projects": {}, "numStartups": 5}"#);
+        merge_and_save_claude_dot_json(&path, &sample_oauth_account(), "uid1".to_string()).unwrap();
+        let v = read_value(&path);
+        assert_eq!(v["projects"], serde_json::json!({}));
+        assert_eq!(v["numStartups"], 5);
+    }
+
+    // ── test 16 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn merge_overwrites_existing_oauth_account() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        write_json(
+            &path,
+            r#"{"oauthAccount": {"accountUuid": "old", "emailAddress": "old@example.com", "organizationUuid": null}, "userID": "old-uid"}"#,
+        );
+        let new_oa = OAuthAccount {
+            account_uuid: "new".to_string(),
+            email_address: "new@example.com".to_string(),
+            organization_uuid: None,
+            other: Map::new(),
+        };
+        merge_and_save_claude_dot_json(&path, &new_oa, "new-uid".to_string()).unwrap();
+        let v = read_value(&path);
+        assert_eq!(v["oauthAccount"]["emailAddress"], "new@example.com");
+        assert_eq!(v["userID"], "new-uid");
+    }
+
+    // ── test 17 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn merge_sets_user_id_top_level() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        merge_and_save_claude_dot_json(&path, &sample_oauth_account(), "uid42".to_string())
+            .unwrap();
+        let v = read_value(&path);
+        assert_eq!(v["userID"], "uid42");
+    }
+
+    // ── test 18 ─────────────────────────────────────────────────────────────
+    #[cfg(unix)]
+    #[test]
+    fn merge_writes_file_mode_0600_on_unix() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        merge_and_save_claude_dot_json(&path, &sample_oauth_account(), "uid".to_string()).unwrap();
+        let mode = fs::metadata(&path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0600, got {mode:o}");
+    }
+
+    // ── test 19 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn merge_handles_missing_file_by_creating_fresh() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        assert!(!path.exists());
+        merge_and_save_claude_dot_json(&path, &sample_oauth_account(), "fresh-uid".to_string())
+            .unwrap();
+        assert!(path.exists());
+        let v = read_value(&path);
+        assert!(v.get("oauthAccount").is_some());
+        assert_eq!(v["userID"], "fresh-uid");
+        // No extra keys beyond oauthAccount and userID
+        let obj = v.as_object().unwrap();
+        assert_eq!(obj.len(), 2);
+    }
+
+    // ── test 20 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn merge_preserves_pretty_2space_indent() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join(".claude.json");
+        merge_and_save_claude_dot_json(&path, &sample_oauth_account(), "uid".to_string()).unwrap();
+        let raw = fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("  \"oauthAccount\":"),
+            "expected 2-space indent, got:\n{raw}"
+        );
+    }
+
+    // ── test 21 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn expires_at_parses_millis_integer() {
+        let json = r#"{"expiresAt": 1800000000000}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let expires: ExpiresAt = serde_json::from_value(parsed["expiresAt"].clone()).unwrap();
+        assert!(matches!(expires, ExpiresAt::Millis(1_800_000_000_000)));
+    }
+
+    // ── test 22 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn expires_at_parses_iso_string() {
+        let json = r#"{"expiresAt": "2027-02-18T07:00:00.000Z"}"#;
+        let parsed: serde_json::Value = serde_json::from_str(json).unwrap();
+        let expires: ExpiresAt = serde_json::from_value(parsed["expiresAt"].clone()).unwrap();
+        assert!(matches!(expires, ExpiresAt::Iso(_)));
+        if let ExpiresAt::Iso(s) = expires {
+            assert_eq!(s, "2027-02-18T07:00:00.000Z");
+        }
+    }
+
+    // ── test 23 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn expires_at_roundtrip_preserves_form() {
+        // Millis form
+        let millis = ExpiresAt::Millis(1_800_000_000_000_i64);
+        let serialized = serde_json::to_string(&millis).unwrap();
+        let deserialized: ExpiresAt = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(deserialized, ExpiresAt::Millis(1_800_000_000_000)));
+
+        // ISO form
+        let iso = ExpiresAt::Iso("2027-02-18T07:00:00.000Z".to_string());
+        let serialized = serde_json::to_string(&iso).unwrap();
+        let deserialized: ExpiresAt = serde_json::from_str(&serialized).unwrap();
+        assert!(matches!(deserialized, ExpiresAt::Iso(_)));
+        if let ExpiresAt::Iso(s) = deserialized {
+            assert_eq!(s, "2027-02-18T07:00:00.000Z");
+        }
+    }
+
+    // ── test 24 ─────────────────────────────────────────────────────────────
+    #[test]
+    fn oauth_account_camelcase_serde_roundtrip() {
+        let account = OAuthAccount {
+            account_uuid: "test-uuid".to_string(),
+            email_address: "user@example.com".to_string(),
+            organization_uuid: Some("org-uuid".to_string()),
+            other: Map::new(),
+        };
+        let json = serde_json::to_string(&account).unwrap();
+        let deserialized: OAuthAccount = serde_json::from_str(&json).unwrap();
+        assert_eq!(deserialized, account);
+        // Verify camelCase key names in output
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(v.get("accountUuid").is_some(), "expected accountUuid key");
+        assert!(v.get("emailAddress").is_some(), "expected emailAddress key");
+        assert!(
+            v.get("organizationUuid").is_some(),
+            "expected organizationUuid key"
+        );
     }
 }
