@@ -25,8 +25,17 @@
 use claude_code_context_switcher::cli;
 
 fn main() {
-    if let Err(e) = cli::run() {
-        eprintln!("error: {e:#}");
-        std::process::exit(1);
+    match cli::run() {
+        Ok(()) => {}
+        Err(e) => {
+            eprintln!("error: {e:#}");
+            // Exit code 3 for "not implemented" stub errors; full mapping in issue 4.4.
+            let code = if format!("{e:#}").contains("not implemented") {
+                3
+            } else {
+                1
+            };
+            std::process::exit(code);
+        }
     }
 }
