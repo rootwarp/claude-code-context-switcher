@@ -354,6 +354,142 @@ impl CredentialBackend for FaultInjectingBackend<'_> {
     }
 }
 
+// ─── SecurityFrameworkBackend ─────────────────────────────────────────────────
+
+/// Real macOS Keychain backend using the `security-framework` crate.
+///
+/// Implements read-modify-write semantics on `set_generic_password`: if a
+/// Keychain item already exists at the given `(service, account)`, the
+/// library's `set_generic_password` updates **only** `kSecValueData` via
+/// `SecItemUpdate`, preserving whatever ACL, label, and access-group attributes
+/// the item already carries (important for Claude Code's own Keychain entry).
+/// New cctx-owned items are created with platform defaults.
+///
+/// **ACL note for issue 3.5**: the GET-to-check-existence on `set` is a real
+/// Keychain read. For cctx-owned items this is silent. For `Claude
+/// Code-credentials` it may trigger a consent prompt; that integration belongs
+/// in 3.5, not here.
+#[cfg(feature = "real-keychain")]
+pub mod real {
+    use super::{BackendError, CredentialBackend, ItemHandle, PasswordOptions};
+    use crate::secret::Secret;
+    use security_framework::item::{ItemClass, ItemSearchOptions, Limit};
+    use security_framework::passwords::{
+        delete_generic_password, get_generic_password, set_generic_password,
+    };
+
+    const ERR_SEC_ITEM_NOT_FOUND: i32 = -25300;
+    const ERR_SEC_AUTH_FAILED: i32 = -25293;
+    const ERR_SEC_USER_CANCELED: i32 = -128;
+
+    #[derive(Debug, Default)]
+    pub struct SecurityFrameworkBackend;
+
+    impl SecurityFrameworkBackend {
+        #[must_use]
+        pub const fn new() -> Self {
+            Self
+        }
+    }
+
+    impl CredentialBackend for SecurityFrameworkBackend {
+        fn get_generic_password(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<Secret<Vec<u8>>, BackendError> {
+            match get_generic_password(service, account) {
+                Ok(bytes) => Ok(Secret::new(bytes)),
+                Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Err(BackendError::NotFound),
+                Err(e) if e.code() == ERR_SEC_AUTH_FAILED || e.code() == ERR_SEC_USER_CANCELED => {
+                    Err(BackendError::AccessDenied)
+                }
+                Err(e) => Err(BackendError::Platform(format!("keychain get: {e}"))),
+            }
+        }
+
+        fn set_generic_password(
+            &self,
+            service: &str,
+            account: &str,
+            password: &[u8],
+            opts: PasswordOptions,
+        ) -> Result<(), BackendError> {
+            match get_generic_password(service, account) {
+                Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => {
+                    // New item — create with platform defaults.
+                    set_generic_password(service, account, password)
+                        .map_err(|e| BackendError::Platform(format!("keychain set: {e}")))
+                }
+                Ok(_) if !opts.update_if_exists => Err(BackendError::DuplicateItem),
+                Ok(_) => {
+                    // Existing item — update only the password bytes (RMW: preserves ACL).
+                    set_generic_password(service, account, password)
+                        .map_err(|e| BackendError::Platform(format!("keychain set: {e}")))
+                }
+                Err(e) if e.code() == ERR_SEC_AUTH_FAILED || e.code() == ERR_SEC_USER_CANCELED => {
+                    Err(BackendError::AccessDenied)
+                }
+                Err(e) => Err(BackendError::Platform(format!("keychain set (check): {e}"))),
+            }
+        }
+
+        fn delete_generic_password(
+            &self,
+            service: &str,
+            account: &str,
+        ) -> Result<(), BackendError> {
+            match delete_generic_password(service, account) {
+                Ok(()) => Ok(()),
+                Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => Err(BackendError::NotFound),
+                Err(e) => Err(BackendError::Platform(format!("keychain delete: {e}"))),
+            }
+        }
+
+        fn enumerate_by_service_prefix(
+            &self,
+            prefix: &str,
+        ) -> Result<Vec<ItemHandle>, BackendError> {
+            // Fetch all generic-password attributes without reading data (avoids ACL prompts
+            // for items cctx doesn't own). Filter by service prefix client-side.
+            let results = match ItemSearchOptions::new()
+                .class(ItemClass::generic_password())
+                .limit(Limit::All)
+                .load_attributes(true)
+                .search()
+            {
+                Ok(v) => v,
+                // errSecItemNotFound means zero generic-password items in the keychain.
+                Err(e) if e.code() == ERR_SEC_ITEM_NOT_FOUND => vec![],
+                Err(e) => {
+                    return Err(BackendError::Platform(format!("keychain enumerate: {e}")));
+                }
+            };
+
+            let mut out = Vec::new();
+            for result in results {
+                if let Some(attrs) = result.simplify_dict() {
+                    let service_val = attrs.get("svce").map_or("", String::as_str).to_owned();
+                    if service_val.starts_with(prefix) {
+                        let account_val = attrs.get("acct").map_or("", String::as_str).to_owned();
+                        let label = attrs.get("labl").cloned();
+                        out.push(ItemHandle {
+                            service: service_val,
+                            account: account_val,
+                            label,
+                        });
+                    }
+                }
+            }
+            out.sort_by(|a, b| (&a.service, &a.account).cmp(&(&b.service, &b.account)));
+            Ok(out)
+        }
+    }
+}
+
+#[cfg(feature = "real-keychain")]
+pub use real::SecurityFrameworkBackend;
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 #[cfg(test)]
