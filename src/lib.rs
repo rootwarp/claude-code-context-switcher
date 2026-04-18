@@ -24,9 +24,12 @@
     )
 )]
 
-/// The Claude Code version this cctx build is known to interoperate with.
-/// Issue 0.7 will set the real observed value from `claude --version`.
-pub const CLAUDE_CODE_PINNED_VERSION: &str = "UNPINNED";
+/// The Claude Code version the Phase-0 research spikes and development observed.
+///
+/// cctx assumes `claude` is at least this version. Adopting a newer version
+/// requires re-running the Phase-0 spikes (0.1 — keychain attrs, 0.2 — userID
+/// rotation, 0.3 — .credentials.json fallback policy) and bumping this pin.
+pub const CLAUDE_CODE_PINNED_VERSION: &str = "2.1.114";
 
 pub mod backup;
 pub mod claude_state;
