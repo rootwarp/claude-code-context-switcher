@@ -115,16 +115,43 @@ fn cctx_switch_unknown_context_exits_nonzero() {
 
 // ── test 4 ─────────────────────────────────────────────────────────────────
 #[test]
-fn cctx_switch_oauth_context_exits_with_phase3_message() {
+fn cctx_switch_oauth_context_with_claude_code_keychain_ref_fails_with_context_corrupt() {
+    // The `personal` context in the fixture has `secret_ref: claude_code_keychain`.
+    // Since there is no live Keychain item (InMemory backend, no item seeded), the
+    // engine cannot locate the source blob and returns ContextCorrupt.
     let (cctx_home, claude_dir) = setup_dirs();
     write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
 
-    // Engine returns Unimplemented; message references "3.5" (the landing issue).
     cctx(&cctx_home, &claude_dir)
         .arg("personal")
         .assert()
         .failure()
-        .stderr(predicate::str::contains("3.5"));
+        .stderr(predicate::str::contains("corrupt or incomplete"));
+}
+
+// ── test 4b ────────────────────────────────────────────────────────────────
+/// OAuth switch integration test against the real macOS Keychain.
+///
+/// Gated behind `#[cfg(feature = "real-keychain")]` and `#[ignore]` so it never
+/// runs in CI.  Enable with:
+///   CCTX_REAL_KEYCHAIN=1 cargo test --features real-keychain -- --ignored
+#[cfg(feature = "real-keychain")]
+#[ignore]
+#[test]
+fn cctx_switch_oauth_real_keychain_end_to_end() {
+    // Verify that `CCTX_REAL_KEYCHAIN` env var is set so the test is intentional.
+    if std::env::var("CCTX_REAL_KEYCHAIN").is_err() {
+        panic!("set CCTX_REAL_KEYCHAIN=1 to run real-keychain tests");
+    }
+
+    // This test is a scaffold for 3.8 release-gate manual testing.
+    // Full implementation requires two real OAuth accounts on the dev laptop.
+    // The test is intentionally left as a panic-placeholder until the release gate.
+    todo!(
+        "implement full OAuth real-keychain end-to-end test for 3.8 release gate: \
+         pre-seed two contexts in real Keychain, cctx switch, verify claude next launch \
+         picks up the selected identity"
+    );
 }
 
 // ── test 5 ─────────────────────────────────────────────────────────────────

@@ -138,7 +138,7 @@ fn execute_api_key_switch(
             .map(|(name, _)| name.clone())
     });
 
-    let (entry_id, snap) = plan_and_snapshot(
+    let (entry_id, snap, snapshot_path) = plan_and_snapshot(
         target_name,
         from.clone(),
         planned_ops,
@@ -150,7 +150,14 @@ fn execute_api_key_switch(
     let written_bytes = match apply_settings(target, stores.settings_json_path) {
         Ok(b) => b,
         Err(e) => {
-            return rollback_and_report(entry_id, e.to_string(), &snap, stores, journal, paths);
+            return rollback_and_report(
+                entry_id,
+                e.to_string(),
+                &snap,
+                stores,
+                journal,
+                snapshot_path,
+            );
         }
     };
 
@@ -165,7 +172,7 @@ fn execute_api_key_switch(
             &snap,
             stores,
             journal,
-            paths,
+            snapshot_path,
         );
     }
 
@@ -262,7 +269,7 @@ fn execute_oauth_switch(
             .map(|(name, _)| name.clone())
     });
 
-    let (entry_id, snap) = plan_and_snapshot(
+    let (entry_id, snap, snapshot_path) = plan_and_snapshot(
         target_name,
         from.clone(),
         planned_ops,
@@ -277,7 +284,14 @@ fn execute_oauth_switch(
     let settings_bytes = match apply_oauth_settings(stores.settings_json_path) {
         Ok(b) => b,
         Err(e) => {
-            return rollback_and_report(entry_id, e.to_string(), &snap, stores, journal, paths);
+            return rollback_and_report(
+                entry_id,
+                e.to_string(),
+                &snap,
+                stores,
+                journal,
+                snapshot_path,
+            );
         }
     };
 
@@ -287,7 +301,14 @@ fn execute_oauth_switch(
         oauth_account,
         user_id.clone(),
     ) {
-        return rollback_and_report(entry_id, e.to_string(), &snap, stores, journal, paths);
+        return rollback_and_report(
+            entry_id,
+            e.to_string(),
+            &snap,
+            stores,
+            journal,
+            snapshot_path,
+        );
     }
 
     // Step 3: Keychain — save current live blob to previous context's mirror, then write target.
@@ -302,7 +323,14 @@ fn execute_oauth_switch(
             &mirror_service,
             stores.keychain_account,
         ) {
-            return rollback_and_report(entry_id, e.to_string(), &snap, stores, journal, paths);
+            return rollback_and_report(
+                entry_id,
+                e.to_string(),
+                &snap,
+                stores,
+                journal,
+                snapshot_path,
+            );
         }
     }
 
@@ -326,7 +354,7 @@ fn execute_oauth_switch(
                 &snap,
                 stores,
                 journal,
-                paths,
+                snapshot_path,
             );
         }
         Err(e) => {
@@ -336,7 +364,7 @@ fn execute_oauth_switch(
                 &snap,
                 stores,
                 journal,
-                paths,
+                snapshot_path,
             );
         }
     };
@@ -357,7 +385,7 @@ fn execute_oauth_switch(
             &snap,
             stores,
             journal,
-            paths,
+            snapshot_path,
         );
     }
 
@@ -365,7 +393,14 @@ fn execute_oauth_switch(
     let cdj_verify_bytes = match build_claude_dot_json_verify_bytes(oauth_account, user_id) {
         Ok(b) => b,
         Err(e) => {
-            return rollback_and_report(entry_id, e.to_string(), &snap, stores, journal, paths);
+            return rollback_and_report(
+                entry_id,
+                e.to_string(),
+                &snap,
+                stores,
+                journal,
+                snapshot_path,
+            );
         }
     };
 
@@ -390,7 +425,7 @@ fn execute_oauth_switch(
             &snap,
             stores,
             journal,
-            paths,
+            snapshot_path,
         );
     }
 
@@ -457,6 +492,9 @@ pub(crate) fn verify_apply(planned: &[PlannedApply], stores: &Stores<'_>) -> Res
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
 /// Shared plan + snapshot boilerplate.
+///
+/// Returns `(entry_id, snapshot, snapshot_path)` so callers can thread the real
+/// path into `rollback_and_report` for accurate `ROLLBACK FAILED` diagnostics.
 fn plan_and_snapshot(
     target_name: &str,
     from: Option<String>,
@@ -464,7 +502,7 @@ fn plan_and_snapshot(
     stores: &Stores<'_>,
     journal: &mut Journal,
     paths: &ConfigPaths,
-) -> Result<(EntryId, backup::Snapshot), Error> {
+) -> Result<(EntryId, backup::Snapshot, std::path::PathBuf), Error> {
     std::fs::create_dir_all(&paths.backups_dir)
         .map_err(|e| Error::SnapshotWriteFailed { source: e })?;
 
@@ -506,7 +544,7 @@ fn plan_and_snapshot(
         }
     };
 
-    Ok((entry_id, snap))
+    Ok((entry_id, snap, snapshot_path))
 }
 
 fn rollback_and_report(
@@ -515,9 +553,8 @@ fn rollback_and_report(
     snap: &backup::Snapshot,
     stores: &Stores<'_>,
     journal: &mut Journal,
-    paths: &ConfigPaths,
+    snapshot_path: std::path::PathBuf,
 ) -> Result<SwitchOutcome, Error> {
-    let snapshot_path = paths.backups_dir.join("rollback.json");
     let rb = backup::restore_snapshot(
         snap,
         stores.backend,
@@ -1239,29 +1276,57 @@ mod tests {
 
     #[test]
     fn oauth_switch_saves_previous_context_blob_to_mirror() {
+        // Verifies the "refreshed tokens survive switch-away" invariant from arch §2:
+        // the live blob (with fresh tokens) is written to ctx-a's mirror BEFORE ctx-b's
+        // blob goes live, so a later switch back to ctx-a picks up the refreshed tokens.
         let env = setup_test_env();
         let backend = InMemoryBackend::new();
 
         let account_a = make_oauth_account("uuid-a", "a@example.com");
         let account_b = make_oauth_account("uuid-b", "b@example.com");
-        let blob_a = test_keychain_blob("token-context-a");
+
+        // ctx-a: two blobs with the SAME accessToken (same fingerprint) but different
+        // refreshToken — simulates what happens after an hourly token refresh.
+        let blob_a_stale = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "token-ctx-a",
+                "refreshToken": "stale-refresh",
+                "expiresAt": 1000_i64
+            }
+        })
+        .to_string()
+        .into_bytes();
+        let blob_a_fresh = serde_json::json!({
+            "claudeAiOauth": {
+                "accessToken": "token-ctx-a",
+                "refreshToken": "fresh-refresh",
+                "expiresAt": 9_999_999_999_i64
+            }
+        })
+        .to_string()
+        .into_bytes();
+
         let blob_b = test_keychain_blob("token-context-b");
 
-        let ctx_a = make_oauth_context_with_blob("ctx-a", "user-a", account_a.clone(), &blob_a);
+        // Build ctx-a using the stale blob to establish the fingerprint.
+        let ctx_a =
+            make_oauth_context_with_blob("ctx-a", "user-a", account_a.clone(), &blob_a_stale);
         let ctx_b = make_oauth_context_with_blob("ctx-b", "user-b", account_b, &blob_b);
 
-        // ctx-a is currently active.
-        seed_live_oauth_state(&backend, &env, &blob_a, "user-a", &account_a);
+        // Live keychain holds blob_a_fresh (refreshed since last cctx run).
+        // claude.json has user-a + uuid-a so fingerprint matches ctx-a (same accessToken).
+        seed_live_oauth_state(&backend, &env, &blob_a_fresh, "user-a", &account_a);
 
-        // Both mirrors pre-seeded.
+        // ctx-a's mirror holds the stale blob (pre-refresh).
         backend
             .set_generic_password(
                 "cctx-oauth-ctx-a",
                 "testuser",
-                &blob_a,
+                &blob_a_stale,
                 PasswordOptions::default(),
             )
             .unwrap();
+        // ctx-b mirror pre-seeded.
         backend
             .set_generic_password(
                 "cctx-oauth-ctx-b",
@@ -1281,14 +1346,15 @@ mod tests {
             "expected Applied to ctx-b, got {outcome:?}"
         );
 
-        // ctx-a's mirror must hold the live blob that was active before the switch.
+        // ctx-a's mirror must now hold blob_a_fresh (NOT the stale one).
+        // This confirms that the live blob's refreshed tokens were preserved.
         let mirror_a = backend
             .get_generic_password("cctx-oauth-ctx-a", "testuser")
             .unwrap();
         assert_eq!(
             mirror_a.expose(),
-            blob_a.as_slice(),
-            "mirror for ctx-a must hold the pre-switch live blob"
+            blob_a_fresh.as_slice(),
+            "mirror for ctx-a must hold the FRESH live blob, not the stale one"
         );
 
         // ctx-b is now the live credential.
