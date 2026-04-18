@@ -73,4 +73,23 @@ pub enum Error {
         #[from]
         source: crate::credential_backend::BackendError,
     },
+
+    /// The journal JSONL file contains a line that cannot be parsed.
+    #[error("journal file corrupt at {path}:{line}: {msg}")]
+    JournalCorrupt {
+        path: PathBuf,
+        line: usize,
+        msg: String,
+    },
+
+    /// An `Update` record references an `EntryId` for which no `Init` record exists.
+    #[error("journal entry not found: id={id}")]
+    JournalEntryNotFound { id: u64 },
+
+    /// A write to the journal file failed.
+    #[error("journal write failed: {source}")]
+    JournalWriteFailed {
+        #[source]
+        source: std::io::Error,
+    },
 }
