@@ -1,0 +1,164 @@
+//! Integration tests for `cctx <name>` / `cctx switch <name>` handler (issue 1.5).
+
+use assert_cmd::Command;
+use predicates::prelude::*;
+use std::fs;
+use tempfile::TempDir;
+
+/// A plaintext API-key context fixture (no base_url).
+const PLAINTEXT_CONTEXTS_YAML: &str = r#"version: 1
+contexts:
+  console-key:
+    name: console-key
+    auth_mode:
+      api_key:
+        base_url: null
+    identity:
+      label: "Console API key"
+    fingerprint: "a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: plaintext
+      value: "sk-ant-console-key-value"
+  personal:
+    name: personal
+    auth_mode: oauth
+    identity:
+      label: "Personal OAuth"
+    fingerprint: "3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b3b"
+    created_at: "2026-04-18T02:14:05Z"
+    secret_ref:
+      kind: claude_code_keychain
+"#;
+
+fn setup_dirs() -> (TempDir, TempDir) {
+    let cctx_home = TempDir::new().unwrap();
+    let claude_dir = TempDir::new().unwrap();
+    (cctx_home, claude_dir)
+}
+
+fn write_contexts(cctx_home: &TempDir, yaml: &str) {
+    fs::write(cctx_home.path().join("contexts.yaml"), yaml).unwrap();
+}
+
+fn write_settings(claude_dir: &TempDir, json: &str) {
+    fs::write(claude_dir.path().join("settings.json"), json).unwrap();
+}
+
+fn cctx(cctx_home: &TempDir, claude_dir: &TempDir) -> Command {
+    let mut cmd = Command::cargo_bin("cctx").unwrap();
+    cmd.env("CCTX_HOME", cctx_home.path());
+    cmd.env("CLAUDE_CONFIG_DIR", claude_dir.path());
+    cmd
+}
+
+fn read_settings(claude_dir: &TempDir) -> serde_json::Value {
+    let raw = fs::read_to_string(claude_dir.path().join("settings.json")).unwrap();
+    serde_json::from_str(&raw).unwrap()
+}
+
+// ── test 1 ─────────────────────────────────────────────────────────────────
+#[test]
+fn cctx_switch_apikey_plaintext_writes_env() {
+    let (cctx_home, claude_dir) = setup_dirs();
+    write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("console-key")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("switched to console-key"));
+
+    let settings = read_settings(&claude_dir);
+    assert_eq!(
+        settings["env"]["ANTHROPIC_API_KEY"],
+        "sk-ant-console-key-value"
+    );
+    assert!(
+        settings["env"].get("ANTHROPIC_AUTH_TOKEN").is_none()
+            || settings["env"]["ANTHROPIC_AUTH_TOKEN"].is_null(),
+        "ANTHROPIC_AUTH_TOKEN must be absent"
+    );
+}
+
+// ── test 2 ─────────────────────────────────────────────────────────────────
+#[test]
+fn cctx_switch_subcommand_same_as_positional() {
+    let (cctx_home, claude_dir) = setup_dirs();
+    write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
+
+    cctx(&cctx_home, &claude_dir)
+        .args(["switch", "console-key"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("switched to console-key"));
+
+    let settings = read_settings(&claude_dir);
+    assert_eq!(
+        settings["env"]["ANTHROPIC_API_KEY"],
+        "sk-ant-console-key-value"
+    );
+}
+
+// ── test 3 ─────────────────────────────────────────────────────────────────
+#[test]
+fn cctx_switch_unknown_context_exits_nonzero() {
+    let (cctx_home, claude_dir) = setup_dirs();
+    write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("does-not-exist")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("context not found"));
+}
+
+// ── test 4 ─────────────────────────────────────────────────────────────────
+#[test]
+fn cctx_switch_oauth_context_exits_with_phase3_message() {
+    let (cctx_home, claude_dir) = setup_dirs();
+    write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("personal")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("Phase 3"));
+}
+
+// ── test 5 ─────────────────────────────────────────────────────────────────
+#[test]
+fn cctx_switch_preserves_unrelated_settings_keys() {
+    let (cctx_home, claude_dir) = setup_dirs();
+    write_contexts(&cctx_home, PLAINTEXT_CONTEXTS_YAML);
+    write_settings(
+        &claude_dir,
+        r#"{"foo": 1, "env": {"BAR": "x", "ANTHROPIC_AUTH_TOKEN": "old-token"}}"#,
+    );
+
+    cctx(&cctx_home, &claude_dir)
+        .arg("console-key")
+        .assert()
+        .success();
+
+    let settings = read_settings(&claude_dir);
+    assert_eq!(
+        settings["foo"], 1,
+        "non-env top-level key must be preserved"
+    );
+    assert_eq!(
+        settings["env"]["BAR"], "x",
+        "unrelated env var must be preserved"
+    );
+    assert_eq!(
+        settings["env"]["ANTHROPIC_API_KEY"],
+        "sk-ant-console-key-value"
+    );
+    // ANTHROPIC_AUTH_TOKEN was explicitly cleared by the switch.
+    assert!(
+        settings["env"]
+            .get("ANTHROPIC_AUTH_TOKEN")
+            .map_or(true, |v| v.is_null()),
+        "ANTHROPIC_AUTH_TOKEN must be cleared"
+    );
+}

@@ -1,9 +1,14 @@
 //! Parse argv via clap derive and dispatch to command handlers.
 
+use std::collections::BTreeMap;
+
 use clap::{ArgAction, Parser, Subcommand};
 use clap_complete::Shell;
 
+use crate::claude_state::{self, AuthModeHint};
 use crate::config::{self, ContextsFile};
+use crate::context::{AuthMode, SecretRef};
+use crate::secret::Secret;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -121,15 +126,48 @@ fn handle_current() -> anyhow::Result<()> {
     );
 }
 
+fn handle_switch(name: &str) -> anyhow::Result<()> {
+    let paths = config::resolve_paths()?;
+    let cf = config::load(&paths)?;
+    let ctx = cf
+        .contexts
+        .get(name)
+        .ok_or_else(|| anyhow::anyhow!("context not found: {name}"))?;
+
+    match (&ctx.auth_mode, &ctx.secret_ref) {
+        (AuthMode::ApiKey { base_url }, SecretRef::Plaintext { value }) => {
+            let mut patch: BTreeMap<String, Option<Secret<String>>> = BTreeMap::new();
+            patch.insert("ANTHROPIC_API_KEY".to_string(), Some(value.clone()));
+            patch.insert("ANTHROPIC_AUTH_TOKEN".to_string(), None);
+            if let Some(url) = base_url {
+                patch.insert(
+                    "ANTHROPIC_BASE_URL".to_string(),
+                    Some(Secret::new(url.to_string())),
+                );
+            } else {
+                patch.insert("ANTHROPIC_BASE_URL".to_string(), None);
+            }
+
+            let settings_path = claude_state::resolve_settings_path()?;
+            claude_state::save_settings_env(&settings_path, patch, AuthModeHint::ApiKey)?;
+            eprintln!("switched to {name}");
+            Ok(())
+        }
+        (AuthMode::ApiKey { .. }, SecretRef::Keychain { .. }) => {
+            anyhow::bail!("keychain-backed API-key contexts not supported until Phase 3")
+        }
+        (AuthMode::ApiKey { .. }, SecretRef::ClaudeCodeKeychain) | (AuthMode::OAuth, _) => {
+            anyhow::bail!("OAuth context switching lands in Phase 3")
+        }
+    }
+}
+
 #[allow(clippy::needless_pass_by_value)]
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match (cli.cmd, cli.name, cli.current) {
         (None, None, false) => handle_list(None),
         (None, _, true) | (Some(Command::Current), _, _) => handle_current(),
-        // Stubs for 1.5–1.7
-        (Some(Command::Switch { .. }), _, _) | (None, Some(_), false) => {
-            anyhow::bail!("switch not implemented yet (issue 1.5)")
-        }
+        (Some(Command::Switch { name }), _, _) | (None, Some(name), false) => handle_switch(&name),
         (Some(Command::Add { oauth: true, .. }), _, _) => {
             eprintln!(
                 "cctx add --oauth is not implemented in v1; \
