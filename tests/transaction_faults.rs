@@ -1,11 +1,8 @@
 //! Fault-injection rollback tests for the switch engine.
-//!
-//! Phase-2 scope: only settings.json is mutated during an API-key switch; the
-//! Keychain and ~/.claude.json paths are stubs.  Tests that require Keychain
-//! writes are marked `#[ignore]` with a forward pointer to issue 3.5.
 
 use std::path::PathBuf;
 
+use claude_code_context_switcher::claude_state::OAuthAccount;
 use claude_code_context_switcher::config::{ConfigPaths, ContextsFile};
 use claude_code_context_switcher::context::{
     AuthMode, Context, Fingerprint, IdentityMetadata, SecretRef,
@@ -22,6 +19,49 @@ use indexmap::IndexMap;
 use tempfile::TempDir;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+fn make_oauth_account(uuid: &str, email: &str) -> OAuthAccount {
+    OAuthAccount {
+        account_uuid: uuid.to_string(),
+        email_address: email.to_string(),
+        organization_uuid: None,
+        other: serde_json::Map::new(),
+    }
+}
+
+fn make_oauth_context(
+    name: &str,
+    user_id: &str,
+    account: OAuthAccount,
+    mirror_service: &str,
+    mirror_account: &str,
+    blob: &[u8],
+) -> Context {
+    use claude_code_context_switcher::claude_state::KeychainBlobEnvelope;
+    let envelope: KeychainBlobEnvelope = serde_json::from_slice(blob).unwrap();
+    let fp = claude_code_context_switcher::fingerprint::compute_oauth(
+        user_id,
+        &account.account_uuid,
+        &envelope.claude_ai_oauth.access_token,
+    );
+    Context {
+        name: name.to_string(),
+        auth_mode: AuthMode::OAuth,
+        identity: IdentityMetadata {
+            user_id: Some(user_id.to_string()),
+            account_uuid: Some(account.account_uuid.clone()),
+            email_hint: Some("w***@example.com".to_string()),
+            label: None,
+            oauth_account: Some(account),
+        },
+        fingerprint: fp,
+        created_at: chrono::Utc::now(),
+        secret_ref: SecretRef::Keychain {
+            service: mirror_service.to_string(),
+            account: mirror_account.to_string(),
+        },
+    }
+}
 
 fn make_api_key_context(name: &str, api_key: &str) -> Context {
     let key = Secret::new(api_key.to_string());
@@ -54,6 +94,33 @@ struct TestEnv {
     pub settings_path: PathBuf,
     pub claude_dot_json_path: PathBuf,
     pub claude_dir: PathBuf,
+}
+
+/// Like `setup_test_env` but places `claude_dot_json_path` in a separate subdirectory.
+/// This lets tests make only the CDJ parent read-only without affecting `settings_path`.
+fn setup_test_env_split_cdj() -> TestEnv {
+    let cctx_dir = TempDir::new().unwrap();
+    let claude_dir = TempDir::new().unwrap();
+    let cdj_sub = claude_dir.path().join("cdj_sub");
+    std::fs::create_dir_all(&cdj_sub).unwrap();
+    let paths = ConfigPaths {
+        backups_dir: cctx_dir.path().join("backups"),
+        journal_file: cctx_dir.path().join("journal.log"),
+        lock_file: cctx_dir.path().join(".lock"),
+        contexts_file: cctx_dir.path().join("contexts.yaml"),
+        config_dir: cctx_dir.path().to_path_buf(),
+    };
+    let settings_path = claude_dir.path().join("settings.json");
+    let claude_dot_json_path = cdj_sub.join(".claude.json");
+    let claude_dir_path = claude_dir.path().to_path_buf();
+    TestEnv {
+        _cctx_dir: cctx_dir,
+        _claude_dir: claude_dir,
+        paths,
+        settings_path,
+        claude_dot_json_path,
+        claude_dir: claude_dir_path,
+    }
 }
 
 fn setup_test_env() -> TestEnv {
@@ -270,17 +337,133 @@ fn journal_has_failed_status_after_rollback() {
     );
 }
 
-/// IGNORED — requires Keychain write in the apply phase, which lands in issue 3.5.
+/// A write fault at the `~/.claude.json` step (step 2 of OAuth apply) must roll back
+/// `settings.json` to its pre-switch state.
 ///
-/// Once issue 3.5 wires engine → Keychain for OAuth contexts, remove `#[ignore]`
-/// and plumb a `FaultInjectingBackend(Set, 1, AccessDenied)` through the OAuth apply path.
-#[ignore = "Keychain apply path lands in issue 3.5; enable then"]
+/// The CDJ parent directory is placed in a separate subdirectory and made read-only so
+/// that only the CDJ write fails; `settings_path`'s parent remains writable and rollback
+/// can restore it.
+#[cfg(unix)]
 #[test]
-fn fault_on_keychain_set_rolls_back() {
-    let env = setup_test_env();
-    let inner = InMemoryBackend::new();
-    let fib = FaultInjectingBackend::new(&inner, FaultMethod::Set, 1, BackendError::AccessDenied);
+fn fault_at_claude_json_write_rolls_back_settings() {
+    use std::os::unix::fs::PermissionsExt as _;
 
-    let _stores = make_stores_with_backend(&fib, &env);
-    // TODO(3.5): construct OAuth context, run execute_switch, assert RolledBack + unchanged state.
+    let env = setup_test_env_split_cdj();
+
+    let original_settings = r#"{"env":{"ANTHROPIC_API_KEY":"sk-ant-orig"}}"#;
+    std::fs::write(&env.settings_path, original_settings).unwrap();
+
+    let blob: Vec<u8> = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "tok-work",
+            "refreshToken": "rtok-work",
+            "expiresAt": 9_999_999_999_999_i64
+        }
+    })
+    .to_string()
+    .into_bytes();
+
+    let account = make_oauth_account("uuid-work", "work@example.com");
+    let ctx = make_oauth_context("work", "user-id-work", account, "cctx-oauth-work", "test-acc", &blob);
+    let cf = contexts_file_with(vec![ctx]);
+
+    let inner = InMemoryBackend::new();
+    inner
+        .set_generic_password("cctx-oauth-work", "test-acc", &blob, PasswordOptions::default())
+        .unwrap();
+
+    // Make the CDJ subdirectory read-only so the step-2 write fails while the
+    // settings parent (a sibling dir) remains writable for rollback.
+    let cdj_parent = env.claude_dot_json_path.parent().unwrap();
+    std::fs::create_dir_all(&env.paths.backups_dir).unwrap();
+    std::fs::set_permissions(cdj_parent, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+    let mut journal = Journal::open(&env.paths.journal_file).unwrap();
+    let stores = make_stores_with_backend(&inner, &env);
+    let result = execute_switch(&cf, "work", &stores, &mut journal, &env.paths);
+
+    std::fs::set_permissions(cdj_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+    assert!(
+        matches!(&result, Ok(SwitchOutcome::RolledBack { .. }) | Err(Error::RollbackFailed { .. })),
+        "expected RolledBack or RollbackFailed, got: {result:?}"
+    );
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&env.settings_path).unwrap()).unwrap();
+    assert_eq!(
+        settings["env"]["ANTHROPIC_API_KEY"], "sk-ant-orig",
+        "settings.json must be restored to pre-switch content after rollback"
+    );
+}
+
+/// A fault at the Keychain `set` step (step 3c of OAuth apply) must roll back both
+/// `settings.json` and `~/.claude.json` to their pre-switch state.
+///
+/// Steps 1 (settings) and 2 (claude.json) succeed before the Keychain write is
+/// attempted; rollback must undo both.
+#[test]
+fn fault_at_keychain_set_rolls_back_all_stores() {
+    let env = setup_test_env();
+
+    let original_settings = r#"{"env":{"ANTHROPIC_API_KEY":"sk-ant-orig"}}"#;
+    std::fs::write(&env.settings_path, original_settings).unwrap();
+
+    let original_cdj = r#"{"userID":"user-orig","oauthAccount":{"accountUuid":"uuid-orig","emailAddress":"orig@example.com"}}"#;
+    std::fs::write(&env.claude_dot_json_path, original_cdj).unwrap();
+
+    let blob: Vec<u8> = serde_json::json!({
+        "claudeAiOauth": {
+            "accessToken": "tok-work",
+            "refreshToken": "rtok-work",
+            "expiresAt": 9_999_999_999_999_i64
+        }
+    })
+    .to_string()
+    .into_bytes();
+
+    let account = make_oauth_account("uuid-work", "work@example.com");
+    let ctx = make_oauth_context("work", "user-id-work", account, "cctx-oauth-work", "test-acc", &blob);
+    let cf = contexts_file_with(vec![ctx]);
+
+    let inner = InMemoryBackend::new();
+    inner
+        .set_generic_password("cctx-oauth-work", "test-acc", &blob, PasswordOptions::default())
+        .unwrap();
+
+    // No live blob at ("test-svc","test-acc") → from=None → step 3a is skipped.
+    // The first Set call is step 3c (writing to the live keychain item).
+    let fault = FaultInjectingBackend::new(&inner, FaultMethod::Set, 1, BackendError::AccessDenied);
+
+    let mut journal = Journal::open(&env.paths.journal_file).unwrap();
+    let stores = Stores {
+        backend: &fault,
+        keychain_service: "test-svc",
+        keychain_account: "test-acc",
+        claude_dot_json_path: &env.claude_dot_json_path,
+        settings_json_path: &env.settings_path,
+        claude_dir: &env.claude_dir,
+    };
+    let result = execute_switch(&cf, "work", &stores, &mut journal, &env.paths);
+
+    assert!(
+        matches!(&result, Ok(SwitchOutcome::RolledBack { .. }) | Err(Error::RollbackFailed { .. })),
+        "expected RolledBack or RollbackFailed, got: {result:?}"
+    );
+
+    let settings: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&env.settings_path).unwrap()).unwrap();
+    assert_eq!(
+        settings["env"]["ANTHROPIC_API_KEY"], "sk-ant-orig",
+        "settings.json must be restored to original content"
+    );
+
+    let cdj =
+        claude_code_context_switcher::claude_state::load_claude_dot_json(&env.claude_dot_json_path)
+            .unwrap();
+    assert_eq!(
+        cdj.user_id.as_deref(),
+        Some("user-orig"),
+        "claude.json must be restored to original content"
+    );
 }
