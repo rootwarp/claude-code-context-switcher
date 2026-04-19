@@ -74,11 +74,12 @@ pub struct Snapshot {
 ///
 /// The keychain blob is stored as a lowercase hex string in `keychain_blob_hex`
 /// so that arbitrary bytes survive JSON round-trips without a base64 dependency.
+/// The field is wrapped in `Secret` so the in-memory copy is zeroized on drop.
 #[derive(Debug, Serialize, Deserialize)]
 struct SnapshotOnDisk {
     taken_at: DateTime<Utc>,
     /// Lowercase hex encoding of the raw keychain blob, or `null` when no item existed.
-    keychain_blob_hex: Option<String>,
+    keychain_blob_hex: Option<Secret<String>>,
     claude_dot_json: Option<serde_json::Value>,
     settings_json: Option<serde_json::Value>,
 }
@@ -206,7 +207,10 @@ pub fn load_snapshot(path: &Path) -> Result<Snapshot, Error> {
 fn snapshot_to_disk(snap: &Snapshot) -> SnapshotOnDisk {
     SnapshotOnDisk {
         taken_at: snap.taken_at,
-        keychain_blob_hex: snap.keychain_blob.as_ref().map(|s| hex_encode(s.expose())),
+        keychain_blob_hex: snap
+            .keychain_blob
+            .as_ref()
+            .map(|s| Secret::new(hex_encode(s.expose()))),
         claude_dot_json: snap.claude_dot_json.clone(),
         settings_json: snap.settings_json.clone(),
     }
@@ -215,7 +219,7 @@ fn snapshot_to_disk(snap: &Snapshot) -> SnapshotOnDisk {
 fn snapshot_from_disk(on_disk: SnapshotOnDisk) -> Result<Snapshot, Error> {
     let keychain_blob = on_disk
         .keychain_blob_hex
-        .map(|hex| hex_decode(&hex).map(Secret::new))
+        .map(|hex| hex_decode(hex.expose()).map(Secret::new))
         .transpose()?;
     Ok(Snapshot {
         keychain_blob,
