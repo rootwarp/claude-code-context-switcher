@@ -51,34 +51,42 @@ pub fn scrub_panic_message(s: &str) -> String {
     RE_HEX.replace_all(&s, "<hex-redacted>").into_owned()
 }
 
-/// Install a panic hook that scrubs secrets from the panic message.
+/// Installs a scrubbing layer before the previous panic hook.
 ///
-/// Safe to call multiple times; each call composes an additional hook layer.
+/// Secret-shaped strings are replaced in the panic message before forwarding
+/// to the prior hook (which may print backtraces etc.).
 pub fn install_panic_hook() {
-    let _prev = std::panic::take_hook();
+    let prev = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
         let raw = info.to_string();
         let clean = scrub_panic_message(&raw);
         eprintln!("{clean}");
+        prev(info);
     }));
 }
 
-/// A `tracing` layer that warns when a sensitive field appears to be unredacted.
+/// Detects tracing events where a known-secret field name carries an unredacted value.
 ///
-/// `Secret<T>` values render as `Secret(***)` and pass through silently.
-/// Raw `String`/`&str` values passed directly to tracing events trigger a warning.
-pub struct RedactingLayer;
+/// Does NOT suppress or modify the event — emits a warning to stderr.
+/// Prevention relies on callers wrapping secrets in `Secret<T>`.
+pub struct SecretLeakCanary;
 
-struct ScrubVisitor;
+pub(crate) struct SecretFieldVisitor {
+    pub(crate) found_leak: bool,
+}
 
-impl tracing::field::Visit for ScrubVisitor {
-    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-        if SCRUB_FIELDS.contains(&field.name()) && !value.contains("***") {
-            eprintln!(
-                "WARN [cctx] secret-field '{}' appears unredacted in tracing event",
-                field.name()
-            );
+impl SecretFieldVisitor {
+    pub(crate) fn check_str(&mut self, name: &str, value: &str) {
+        if SCRUB_FIELDS.contains(&name) && !value.contains("***") {
+            eprintln!("WARN [cctx] secret-field '{name}' appears unredacted in tracing event");
+            self.found_leak = true;
         }
+    }
+}
+
+impl tracing::field::Visit for SecretFieldVisitor {
+    fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        self.check_str(field.name(), value);
     }
 
     fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
@@ -89,18 +97,19 @@ impl tracing::field::Visit for ScrubVisitor {
                     "WARN [cctx] secret-field '{}' appears unredacted in tracing event",
                     field.name()
                 );
+                self.found_leak = true;
             }
         }
     }
 }
 
-impl<S: Subscriber> Layer<S> for RedactingLayer {
+impl<S: Subscriber> Layer<S> for SecretLeakCanary {
     fn on_event(
         &self,
         event: &tracing::Event<'_>,
         _ctx: tracing_subscriber::layer::Context<'_, S>,
     ) {
-        let mut visitor = ScrubVisitor;
+        let mut visitor = SecretFieldVisitor { found_leak: false };
         event.record(&mut visitor);
     }
 }
@@ -119,7 +128,7 @@ pub fn init(verbosity: u8) {
         let fmt = tracing_subscriber::fmt::layer().with_writer(std::io::stderr);
 
         tracing_subscriber::registry()
-            .with(RedactingLayer)
+            .with(SecretLeakCanary)
             .with(filter)
             .with(fmt)
             .try_init()
@@ -176,5 +185,19 @@ mod tests {
             !output.contains("deadbeefcafebabe0123456789abcdef"),
             "output: {output}"
         );
+    }
+
+    #[test]
+    fn secret_field_visitor_warns_on_raw_value() {
+        let mut visitor = SecretFieldVisitor { found_leak: false };
+        visitor.check_str("access_token", "sk-ant-raw");
+        assert!(visitor.found_leak);
+    }
+
+    #[test]
+    fn secret_field_visitor_silent_for_redacted_value() {
+        let mut visitor = SecretFieldVisitor { found_leak: false };
+        visitor.check_str("access_token", "Secret(***)");
+        assert!(!visitor.found_leak);
     }
 }
