@@ -1,119 +1,54 @@
 # cctx — Claude Code Context Switcher
 
-Switch Claude Code authentication identities (OAuth subscription and API-key)
-from the command line — no manual `/logout` / `/login`.
-
-**Platform:** macOS (Keychain-backed). Linux/Windows: P2 backlog.  
-**Status:** Phase 3 in progress — OAuth switching end-to-end is wired; `cctx add`
-OAuth capture and the release-gate runbook are the remaining Phase-3 items.
+`cctx` switches Claude Code authentication identities (OAuth subscription and API-key accounts) from the command line — no manual `/logout` / `/login`. Store each identity under a short name, then `cctx <name>` to activate it; the next `claude` launch picks it up automatically. Secrets live in the macOS Keychain; config files are mode 0600. **Platform:** macOS (Keychain-backed). Linux/Windows: P2 backlog. Not to be confused with [nwiizo/cctx](https://github.com/nwiizo/cctx), a different tool for switching Claude Code settings and MCP servers — see "Name collision" below.
 
 ---
 
-## Installation
+## Install
+
+### Homebrew (recommended, v1+)
 
 ```sh
-cargo install --path .
+brew install rootwarp/tap/cctx
 ```
 
-Homebrew tap (`brew install rootwarp/tap/cctx`) ships with v1. Until then, use
-`cargo install`.
-
----
-
-## How to use
-
-### Add a context
-
-Log in to a Claude account first, then capture it:
+### Cargo
 
 ```sh
-claude /login           # authenticate in Claude Code as usual
-cctx add work           # snapshot the active identity as "work"
-```
-
-Repeat for each identity you want to manage. For an API-key context, set the key
-in `~/.claude/settings.json` before running `cctx add`.
-
-> `cctx add --oauth` (interactive guided capture) is a P1 item landing in v1.1.
-> In v1, run `claude /login` manually first, then `cctx add <name>`.
-
-### List contexts
-
-```sh
-cctx
-```
-
-Prints all stored contexts with `*` marking the currently-active one. If the
-live identity was not added with `cctx add`, it shows as `(unmanaged)`.
-
-### Switch
-
-```sh
-cctx work               # switch to "work"
-cctx personal           # switch to "personal"
-cctx switch work        # explicit subcommand form; identical behaviour
-```
-
-The next `claude` launch picks up the new identity with no additional steps.
-
-### Print active context
-
-```sh
-cctx -c
-cctx current            # alias
-```
-
-Exits 3 (`ContextNotFound`) if the live identity is not in `contexts.yaml`.
-
-### Delete a context
-
-```sh
-cctx delete staging
-cctx delete staging --force   # skip active-context guard
-```
-
-Removes the entry from `contexts.yaml` and sweeps any cctx-owned Keychain items
-for that context.
-
-### Rename a context
-
-```sh
-cctx rename old-name new-name
-```
-
-Updates the YAML entry and renames cctx-owned Keychain items. (v1.1 P1 item;
-currently a stub in v1.)
-
-### Recover from a crashed switch
-
-If cctx is interrupted mid-switch (power loss, `kill -9`), the journal records
-the partial state. On the next run cctx auto-detects it and prints a recovery
-hint. You can also run doctor directly:
-
-```sh
-cctx doctor             # inspect journal state
-cctx doctor --dry-run   # show what rollback/commit would do, without acting
-cctx doctor --rollback  # restore the pre-switch snapshot
-cctx doctor --commit    # mark an incomplete switch as committed
-```
-
-Exit 5 means doctor can recover the state. Exit 6 means the rollback itself
-failed — the snapshot path is printed; restore manually.
-
-### Shell completions
-
-```sh
-cctx completions zsh    # or bash / fish
+cargo install claude-code-context-switcher
 ```
 
 ---
 
-## Environment variables
+## Quickstart
 
-| Variable | Purpose |
-|---|---|
-| `CCTX_HOME` | Override cctx config dir (default `~/.config/cctx`). Primarily for tests. |
-| `CLAUDE_CONFIG_DIR` | Override Claude Code config dir (default `~/.claude`). Mirrors the Claude Code env knob. |
+```sh
+# 1. Log in to the first account in Claude Code
+claude /login
+
+# 2. Snapshot the active identity as "personal"
+cctx add personal
+
+# 3. Later, switch to a different stored context
+cctx work
+```
+
+Repeat step 1–2 for each account. Use `cctx` (no arguments) to list all stored contexts.
+
+---
+
+## Commands
+
+| Command | What it does | Example |
+|---|---|---|
+| `cctx` | List all stored contexts (`*` marks the active one) | `cctx` |
+| `cctx <name>` | Switch to a stored context | `cctx work` |
+| `cctx -c` / `cctx current` | Print the currently-active context name | `cctx -c` |
+| `cctx add <name>` | Capture the live identity as a new context | `cctx add personal` |
+| `cctx delete <name>` | Remove a stored context | `cctx delete staging` |
+| `cctx rename <old> <new>` | Rename a context (v1.1) | `cctx rename old new` |
+| `cctx doctor` | Inspect and repair incomplete switch state | `cctx doctor --dry-run` |
+| `cctx completions <shell>` | Emit a shell completion script | `cctx completions zsh` |
 
 ---
 
@@ -123,7 +58,6 @@ cctx completions zsh    # or bash / fish
 |---|---|
 | 0 | Success (including NoOp — context already active) |
 | 1 | Unexpected error |
-| 2 | Argument parse error (clap) |
 | 3 | Not found / not implemented (`ContextNotFound`, `KeychainItemMissing`, `Unimplemented`) |
 | 4 | Config / parse error (`ContextsParseError`, `ClaudeStateParseError`, `.credentials.json` fallback) |
 | 5 | Doctor-recoverable (`PartiallyAppliedState`, `ConcurrentAccess`, `VerifyFailed`) |
@@ -131,35 +65,49 @@ cctx completions zsh    # or bash / fish
 
 ---
 
-## Known limitations (v1)
+## Environment variables
 
-- **`cctx add` OAuth capture** — the Keychain mirror path (`cctx-oauth-<name>`)
-  is not yet written in `handle_add`; switching to OAuth contexts captured in
-  Phase 3 requires the blob already present in `Claude Code-credentials` at add
-  time. Full OAuth capture lands before the Phase-3 exit gate.
-- **`cctx add --oauth`** — interactive guided capture is a P1 item (v1.1).
-  Run `claude /login` manually first.
-- **`cctx rename`** — stub; Keychain rename lands in Phase 6 (v1.1).
-- **`cctx exec`** — P2 backlog. API-key exec via child env can ship
-  independently; OAuth exec is blocked on upstream
-  [#37512](https://github.com/anthropics/claude-code/issues/37512).
-- **Name collision** — an unrelated `nwiizo/cctx` exists; this project's binary
-  is also named `cctx`. If both are installed, the last one on `$PATH` wins.
+| Variable | Purpose |
+|---|---|
+| `CCTX_HOME` | Override cctx config dir (default `~/.config/cctx`). Unstable — primarily for tests. |
+| `CLAUDE_CONFIG_DIR` | Override Claude Code config dir (default `~/.claude`). Mirrors the Claude Code env knob. |
+| `CCTX_REAL_KEYCHAIN=1` | Unlocks real-Keychain integration tests (requires macOS Keychain access). |
+
+---
+
+## Why not `cctx exec`?
+
+API-key-only `exec` is a P2 backlog item. OAuth-based exec is blocked upstream on [issue #37512](https://github.com/anthropics/claude-code/issues/37512), which silently purges the Keychain entry when `CLAUDE_CODE_OAUTH_TOKEN` is set in a child process.
+
+---
+
+## What "(unmanaged)" means
+
+When `cctx` lists contexts, it auto-detects which stored context matches the live Claude Code identity by fingerprint. If the active identity was not captured with `cctx add`, the list shows `(unmanaged)` — the identity is live but not tracked by cctx.
+
+---
+
+## Name collision
+
+An unrelated tool [nwiizo/cctx](https://github.com/nwiizo/cctx) exists with the same binary name. That tool switches Claude Code *settings and MCP servers*; this tool switches *authentication identities* (OAuth / API key). If both are installed, the last one on `$PATH` wins.
+
+---
+
+## Security model
+
+`Secret<T>` wraps sensitive strings and calls `zeroize` on drop so key material is cleared from memory when it goes out of scope. OAuth credential blobs are stored only in the macOS Keychain — they are never written to disk by cctx. Backup snapshots written during a switch and the `contexts.yaml` config file are both created with mode 0600.
 
 ---
 
 ## Claude Code version policy
 
-cctx is validated against Claude Code **`2.1.114`** (the version observed during
-Phase-0 research). This pin lives in `src/lib.rs::CLAUDE_CODE_PINNED_VERSION`.
+cctx is validated against Claude Code **`2.1.114`** (the version observed during Phase-0 research). This pin lives in `src/lib.rs::CLAUDE_CODE_PINNED_VERSION`.
 
 ```sh
 claude --version        # verify your local version
 ```
 
-If your version differs, cctx may still work, but the Keychain attribute schema,
-`~/.claude.json` identity-block layout, and `~/.claude/settings.json` env keys
-have not been re-validated against that version.
+If your version differs, cctx may still work, but the Keychain attribute schema, `~/.claude.json` identity-block layout, and `~/.claude/settings.json` env keys have not been re-validated against that version.
 
 ### Bumping the pin
 
@@ -170,5 +118,4 @@ have not been re-validated against that version.
 2. Update `CLAUDE_CODE_PINNED_VERSION` in `src/lib.rs`.
 3. Update this README.
 
-Disable Claude Code auto-update on the dev machine during active cctx development
-to avoid mid-sprint schema surprises.
+Disable Claude Code auto-update on the dev machine during active cctx development to avoid mid-sprint schema surprises.

@@ -32,6 +32,7 @@ pub struct Cli {
     pub cmd: Option<Command>,
 
     /// Positional shortcut for `cctx switch <name>`.
+    #[arg(help = "Context name to switch to")]
     pub name: Option<String>,
 
     /// Print the currently-active context name and exit.
@@ -52,24 +53,28 @@ pub enum Command {
     /// Capture the currently-active credentials as a new context.
     Add {
         name: String,
-        /// Walk through `claude /login` and capture the new OAuth entry (P1; stub in v1).
+        /// Interactive guided OAuth capture — Phase-6 stub; run `claude /login` then `cctx add` without --oauth.
         #[arg(long)]
         oauth: bool,
     },
     /// Delete a stored context.
     Delete {
         name: String,
+        /// Skip the active-context guard and force deletion.
         #[arg(long)]
         force: bool,
     },
-    /// Rename a stored context (P1).
+    /// Rename a stored context (v1.1).
     Rename { old: String, new: String },
     /// Diagnose and optionally repair crash state.
     Doctor {
+        /// Show what rollback or commit would do without making any changes.
         #[arg(long)]
         dry_run: bool,
+        /// Restore the pre-switch snapshot from the journal.
         #[arg(long, conflicts_with = "dry_run")]
         rollback: bool,
+        /// Mark an incomplete switch as committed and clear the journal entry.
         #[arg(long, conflicts_with_all = ["dry_run", "rollback"])]
         commit: bool,
     },
