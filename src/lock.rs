@@ -21,14 +21,14 @@ impl Drop for Guard {
 /// Acquire exclusive advisory lock on `lock_file_path`. Polls `try_lock_exclusive` every 50ms
 /// up to `timeout`. Creates the lock file with mode 0600 if absent.
 ///
-/// The effective timeout can be overridden by `CCTX_LOCK_TIMEOUT_MS` (milliseconds); this is
+/// The effective timeout can be overridden by `CCTX_TEST_LOCK_TIMEOUT_MS` (milliseconds); this is
 /// intended for tests that need deterministic concurrent-access outcomes.
 ///
 /// # Errors
 /// - `Error::ConcurrentAccess` — timeout elapsed; another cctx process holds the lock.
 /// - `Error::ConfigWriteFailed` — lock file couldn't be created or opened.
 pub fn acquire_exclusive(lock_file_path: &Path, timeout: Duration) -> Result<Guard, Error> {
-    let timeout = std::env::var("CCTX_LOCK_TIMEOUT_MS")
+    let timeout = std::env::var("CCTX_TEST_LOCK_TIMEOUT_MS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .map_or(timeout, Duration::from_millis);

@@ -41,7 +41,7 @@ fn twenty_alternating_switches_leave_no_orphans() {
 fn oauth_api_key_alternation_no_orphans() {
     if skip_unless_real_keychain() { return; }
     let backend = SecurityFrameworkBackend::new();
-    for i in 0..10 {
+    for i in 0..11 {
         let name = if i % 2 == 0 { "personal" } else { "console-key" };
         let status = cctx_bin().arg(name).status().unwrap();
         assert!(status.success(), "switch {name} failed on iteration {i}");

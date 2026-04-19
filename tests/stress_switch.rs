@@ -192,7 +192,7 @@ fn stress_corrupted_journal_line_is_rejected() {
 
 /// 5 concurrent `cctx ctx-a` invocations: exactly 1 succeeds, 4 exit with ConcurrentAccess (5).
 ///
-/// Uses `CCTX_LOCK_TIMEOUT_MS=0` so blocked processes immediately fail rather than retrying,
+/// Uses `CCTX_TEST_LOCK_TIMEOUT_MS=0` so blocked processes immediately fail rather than retrying,
 /// making the outcome deterministic.
 #[test]
 fn five_concurrent_switches_one_wins() {
@@ -211,7 +211,7 @@ fn five_concurrent_switches_one_wins() {
                 .env("CCTX_HOME", cctx_home.path())
                 .env("CLAUDE_CONFIG_DIR", claude_dir.path())
                 .env("CCTX_TEST_IN_MEMORY_KEYCHAIN", "1")
-                .env("CCTX_LOCK_TIMEOUT_MS", "0")
+                .env("CCTX_TEST_LOCK_TIMEOUT_MS", "0")
                 .spawn()
                 .expect("failed to spawn cctx")
         })
