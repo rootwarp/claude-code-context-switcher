@@ -9,6 +9,7 @@ CCTX binary: install via `cargo install --path .` from the repo root.
 - `claude /login` done twice (once as each account), with `cctx add personal` and `cctx add work` in between
 - `cctx list` shows both contexts
 - `cctx -c` shows one of them as active
+- When running the automated scaffold: `CCTX_RELEASE_GATE=1 CCTX_REAL_KEYCHAIN=1 cargo test --test release_gate -- --ignored --test-threads=1`
 
 ## Test 1: OAuth → OAuth
 
@@ -41,10 +42,12 @@ CCTX binary: install via `cargo install --path .` from the repo root.
 
 ```bash
 for i in $(seq 1 10); do cctx work; cctx personal; done
-security find-generic-password -s "Claude Code-credentials" | grep -c "keychain"
+count=$(security dump-keychain 2>/dev/null | grep -c '"Claude Code-credentials"' || true)
+echo "Keychain item count: $count"
+[ "$count" -eq 1 ] || echo "FAIL: expected 1, got $count (orphaned entries present?)"
 ```
 
-**Expected outcome:** All 20 `cctx` invocations exit 0. The `security` command returns exactly `1` — confirming only one `Claude Code-credentials` item exists in the Keychain with no orphaned entries.
+**Expected outcome:** All 20 `cctx` invocations exit 0. `$count` equals `1` — confirming only one `Claude Code-credentials` item exists in the Keychain with no orphaned entries. Run tests with `--test-threads=1` to avoid keychain races between concurrent test functions.
 
 ## Performance spot-check
 

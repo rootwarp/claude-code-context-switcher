@@ -1,7 +1,7 @@
 //! Release-gate integration tests — Phase 3 exit criteria.
 //!
 //! All tests are `#[ignore]`. Run with:
-//!   CCTX_RELEASE_GATE=1 CCTX_REAL_KEYCHAIN=1 cargo test --test release_gate -- --ignored
+//!   CCTX_RELEASE_GATE=1 CCTX_REAL_KEYCHAIN=1 cargo test --test release_gate -- --ignored --test-threads=1
 //!
 //! Prerequisites: `personal` and `work` OAuth contexts registered via `cctx add`.
 //! See `plan/release-gate-runbook.md` for the full manual steps.
@@ -56,25 +56,28 @@ fn release_gate_stress_20_switches() {
 
 /// Each of `cctx`, `cctx -c`, and `cctx work` must complete within 500 ms.
 ///
-/// The manual runbook threshold is 100 ms; 500 ms is a generous CI bound.
+/// Enforced CI bound: 500ms. Manual runbook goal: 100ms (`time cctx` on a warm system).
 #[ignore = "requires CCTX_RELEASE_GATE=1 CCTX_REAL_KEYCHAIN=1 and registered OAuth contexts"]
 #[test]
-fn release_gate_performance_under_100ms() {
+fn release_gate_performance_under_500ms() {
     if !release_gate_enabled() {
         return;
     }
 
     let threshold = std::time::Duration::from_millis(500);
 
-    let cases: &[&[&str]] = &[&[], &["-c"], &["work"]];
-    for args in cases {
+    // (args, assert_success): list/current may exit non-zero with no active context;
+    // `cctx work` targets a registered context and must exit 0.
+    let cases: &[(&[&str], bool)] = &[(&[], false), (&["-c"], false), (&["work"], true)];
+    for (args, assert_success) in cases {
         let start = std::time::Instant::now();
         let mut cmd = std::process::Command::new(assert_cmd::cargo::cargo_bin("cctx"));
         cmd.args(*args);
         let status = cmd.status().expect("failed to spawn cctx");
         let elapsed = start.elapsed();
-        // list/current may exit non-zero if no context is active; we only check timing
-        let _ = status;
+        if *assert_success {
+            assert!(status.success(), "cctx work must exit 0 in performance test");
+        }
         assert!(
             elapsed < threshold,
             "cctx {:?} took {:?}, expected < {:?}",
