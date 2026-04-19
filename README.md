@@ -43,7 +43,7 @@ Repeat step 1–2 for each account. Use `cctx` (no arguments) to list all stored
 |---|---|---|
 | `cctx` | List all stored contexts (`*` marks the active one) | `cctx` |
 | `cctx <name>` | Switch to a stored context | `cctx work` |
-| `cctx -c` / `cctx current` | Print the currently-active context name | `cctx -c` |
+| `cctx -c` / `cctx current` | Print the currently-active context name (v1.1) | `cctx -c` |
 | `cctx add <name>` | Capture the live identity as a new context | `cctx add personal` |
 | `cctx delete <name>` | Remove a stored context | `cctx delete staging` |
 | `cctx rename <old> <new>` | Rename a context (v1.1) | `cctx rename old new` |
@@ -58,6 +58,7 @@ Repeat step 1–2 for each account. Use `cctx` (no arguments) to list all stored
 |---|---|
 | 0 | Success (including NoOp — context already active) |
 | 1 | Unexpected error |
+| 2 | Argument parse error (clap) |
 | 3 | Not found / not implemented (`ContextNotFound`, `KeychainItemMissing`, `Unimplemented`) |
 | 4 | Config / parse error (`ContextsParseError`, `ClaudeStateParseError`, `.credentials.json` fallback) |
 | 5 | Doctor-recoverable (`PartiallyAppliedState`, `ConcurrentAccess`, `VerifyFailed`) |

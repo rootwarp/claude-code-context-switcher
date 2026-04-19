@@ -53,7 +53,7 @@ pub enum Command {
     /// Capture the currently-active credentials as a new context.
     Add {
         name: String,
-        /// Interactive guided OAuth capture — Phase-6 stub; run `claude /login` then `cctx add` without --oauth.
+        /// Interactive guided OAuth capture (v1.1 stub) — run `claude /login` then `cctx add` without --oauth.
         #[arg(long)]
         oauth: bool,
     },
