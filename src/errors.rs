@@ -8,12 +8,20 @@ use std::path::PathBuf;
 /// taxonomy (Phase 4) grows this enum incrementally.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
+    /// `contexts.yaml` is absent or cannot be opened.
+    #[error("contexts file not found: {path}")]
+    ContextsFileMissing { path: PathBuf },
+
     /// A fingerprint hex string was malformed.
     #[error("invalid fingerprint: {msg}")]
     FingerprintParseError {
         /// Human-readable description of why parsing failed.
         msg: String,
     },
+
+    /// Two fingerprints that should be equal differ.
+    #[error("fingerprint mismatch: expected {expected}, actual {actual}")]
+    FingerprintMismatch { expected: String, actual: String },
 
     /// `contexts.yaml` could not be parsed.
     #[error("failed to parse {path}: {msg}")]
@@ -75,6 +83,21 @@ pub enum Error {
     #[error("keychain backend: {source}")]
     KeychainBackend {
         #[from]
+        source: crate::credential_backend::BackendError,
+    },
+
+    /// OS denied access to the keychain service (user cancelled or ACL rejected).
+    #[error("keychain access denied for service: {service}")]
+    KeychainAccessDenied { service: String },
+
+    /// A keychain item was expected but not found.
+    #[error("keychain item not found: service={service}, account={account}")]
+    KeychainItemMissing { service: String, account: String },
+
+    /// A write to the keychain failed.
+    #[error("keychain write failed: {source}")]
+    KeychainWriteFailed {
+        #[source]
         source: crate::credential_backend::BackendError,
     },
 
@@ -152,4 +175,58 @@ pub enum Error {
     /// A stored context is missing required fields for the requested operation.
     #[error("context '{name}' is corrupt or incomplete: {detail}")]
     ContextCorrupt { name: String, detail: String },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn contexts_file_missing_message() {
+        let e = Error::ContextsFileMissing {
+            path: PathBuf::from("/home/user/.config/cctx/contexts.yaml"),
+        };
+        assert!(e.to_string().contains("contexts file not found"));
+        assert!(e.to_string().contains("contexts.yaml"));
+    }
+
+    #[test]
+    fn keychain_access_denied_message() {
+        let e = Error::KeychainAccessDenied {
+            service: "Claude Code-credentials".to_string(),
+        };
+        assert!(e.to_string().contains("keychain access denied"));
+        assert!(e.to_string().contains("Claude Code-credentials"));
+    }
+
+    #[test]
+    fn keychain_item_missing_message() {
+        let e = Error::KeychainItemMissing {
+            service: "cctx-oauth-work".to_string(),
+            account: "alice".to_string(),
+        };
+        assert!(e.to_string().contains("keychain item not found"));
+        assert!(e.to_string().contains("cctx-oauth-work"));
+        assert!(e.to_string().contains("alice"));
+    }
+
+    #[test]
+    fn keychain_write_failed_message() {
+        use crate::credential_backend::BackendError;
+        let e = Error::KeychainWriteFailed {
+            source: BackendError::AccessDenied,
+        };
+        assert!(e.to_string().contains("keychain write failed"));
+    }
+
+    #[test]
+    fn fingerprint_mismatch_message() {
+        let e = Error::FingerprintMismatch {
+            expected: "deadbeef".to_string(),
+            actual: "cafebabe".to_string(),
+        };
+        assert!(e.to_string().contains("fingerprint mismatch"));
+        assert!(e.to_string().contains("deadbeef"));
+        assert!(e.to_string().contains("cafebabe"));
+    }
 }

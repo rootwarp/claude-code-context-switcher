@@ -341,14 +341,24 @@ fn execute_oauth_switch(
     {
         Ok(b) => b,
         Err(BackendError::NotFound) => {
-            let detail = format!(
-                "mirror blob not found at ({target_mirror_service}, {target_mirror_account})"
-            );
             return rollback_and_report(
                 entry_id,
-                Error::ContextCorrupt {
-                    name: target_name.to_string(),
-                    detail,
+                Error::KeychainItemMissing {
+                    service: target_mirror_service.clone(),
+                    account: target_mirror_account.clone(),
+                }
+                .to_string(),
+                &snap,
+                stores,
+                journal,
+                snapshot_path,
+            );
+        }
+        Err(BackendError::AccessDenied) => {
+            return rollback_and_report(
+                entry_id,
+                Error::KeychainAccessDenied {
+                    service: target_mirror_service.clone(),
                 }
                 .to_string(),
                 &snap,
@@ -602,6 +612,11 @@ fn compute_live_oauth_fingerprint(
     let blob = match backend.get_generic_password(keychain_service, keychain_account) {
         Ok(b) => b,
         Err(BackendError::NotFound) => return Ok(None),
+        Err(BackendError::AccessDenied) => {
+            return Err(Error::KeychainAccessDenied {
+                service: keychain_service.to_string(),
+            })
+        }
         Err(e) => return Err(Error::KeychainBackend { source: e }),
     };
 
