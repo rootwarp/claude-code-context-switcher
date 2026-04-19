@@ -25,15 +25,9 @@
   "numStartups": 42,
   "promptQueueUseCount": 7,
   "oauthAccount": {
-    "accountUuid": "cccccccc-3333-3333-3333-cccccccccccc",
-    "emailAddress": "new-user@example.com",
-    "organizationUuid": "dddddddd-4444-4444-4444-dddddddddddd",
-    "hasExtraUsageEnabled": false,
-    "billingType": "free",
-    "displayName": "New User",
-    "organizationRole": "member",
-    "workspaceRole": null,
-    "organizationName": "New Org"
+    "accountUuid": "aaaa-bbbb-cccc-dddd",
+    "emailAddress": "merged@test.example",
+    "organizationUuid": "org-1234"
   },
-  "userID": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+  "userID": "test-uid-merge"
 }

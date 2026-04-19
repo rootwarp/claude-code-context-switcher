@@ -1,0 +1,13 @@
+{
+  "numStartups": 1,
+  "aiModelPreferences": {
+    "defaultModel": "claude-opus-4",
+    "fallback": true
+  },
+  "oauthAccount": {
+    "accountUuid": "aaaa-bbbb-cccc-dddd",
+    "emailAddress": "merged@test.example",
+    "organizationUuid": "org-1234"
+  },
+  "userID": "test-uid-merge"
+}

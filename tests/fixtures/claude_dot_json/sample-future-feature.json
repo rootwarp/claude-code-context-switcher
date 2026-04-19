@@ -1,0 +1,13 @@
+{
+  "oauthAccount": {
+    "accountUuid": "55555555-aaaa-bbbb-cccc-dddddddddddd",
+    "emailAddress": "future@redacted.example",
+    "organizationUuid": null
+  },
+  "userID": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc3333",
+  "numStartups": 1,
+  "aiModelPreferences": {
+    "defaultModel": "claude-opus-4",
+    "fallback": true
+  }
+}

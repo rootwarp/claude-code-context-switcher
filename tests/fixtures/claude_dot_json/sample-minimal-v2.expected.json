@@ -1,0 +1,8 @@
+{
+  "oauthAccount": {
+    "accountUuid": "aaaa-bbbb-cccc-dddd",
+    "emailAddress": "merged@test.example",
+    "organizationUuid": "org-1234"
+  },
+  "userID": "test-uid-merge"
+}

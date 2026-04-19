@@ -1,0 +1,15 @@
+{
+  "oauthAccount": {
+    "accountUuid": "33333333-aaaa-bbbb-cccc-dddddddddddd",
+    "emailAddress": "jose@redacted.example",
+    "organizationUuid": "44444444-aaaa-bbbb-cccc-dddddddddddd",
+    "displayName": "José",
+    "organizationRole": "member",
+    "workspaceRole": null
+  },
+  "userID": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb2222",
+  "recentModels": [],
+  "primaryEmail": null,
+  "numStartups": 3,
+  "hasCompletedOnboarding": false
+}

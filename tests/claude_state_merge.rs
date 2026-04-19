@@ -35,34 +35,70 @@ fn new_incoming_account() -> OAuthAccount {
     }
 }
 
+/// Standard identity used by the golden-corpus parametric test.
+fn merge_identity_account() -> OAuthAccount {
+    OAuthAccount {
+        account_uuid: "aaaa-bbbb-cccc-dddd".to_string(),
+        email_address: "merged@test.example".to_string(),
+        organization_uuid: Some("org-1234".to_string()),
+        other: Map::new(),
+    }
+}
+
+const MERGE_USER_ID: &str = "test-uid-merge";
+
 fn fixture(name: &str) -> std::path::PathBuf {
     std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/fixtures/claude_dot_json")
         .join(name)
 }
 
-/// Merge against the full-sample fixture and verify the result matches the expected fixture.
+/// Parametric golden-corpus test: for every `*.json` that has a `*.expected.json` sibling,
+/// merge with the standard test identity and assert JSON-value equality (key-order agnostic).
 #[test]
-fn merge_against_realistic_claude_dot_json_preserves_cachelist() {
-    let dir = TempDir::new().unwrap();
-    let path = dir.path().join(".claude.json");
+fn merge_golden_corpus() {
+    let fixture_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/fixtures/claude_dot_json");
 
-    // Seed the file with the realistic fixture
-    fs::copy(fixture("full-sample.json"), &path).unwrap();
+    let mut pairs_tested = 0u32;
 
-    let new_user_id =
-        "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc".to_string();
-    merge_and_save_claude_dot_json(&path, &new_incoming_account(), new_user_id).unwrap();
+    let mut entries: Vec<_> = fs::read_dir(&fixture_dir)
+        .expect("fixture dir must exist")
+        .filter_map(|e| e.ok())
+        .collect();
+    entries.sort_by_key(|e| e.file_name());
 
-    let result: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    let expected: Value =
-        serde_json::from_str(&fs::read_to_string(fixture("full-sample.expected.json")).unwrap())
-            .unwrap();
+    for entry in entries {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("json") {
+            continue;
+        }
+        let stem = path.file_stem().unwrap().to_string_lossy();
+        if stem.ends_with(".expected") {
+            continue;
+        }
+        let expected_path = fixture_dir.join(format!("{stem}.expected.json"));
+        if !expected_path.exists() {
+            continue;
+        }
 
-    assert_eq!(
-        result, expected,
-        "merge output did not match expected fixture"
-    );
+        let dir = TempDir::new().unwrap();
+        let work = dir.path().join("state.json");
+        fs::copy(&path, &work).unwrap();
+
+        merge_and_save_claude_dot_json(&work, &merge_identity_account(), MERGE_USER_ID.to_string())
+            .unwrap_or_else(|e| panic!("merge failed for {stem}: {e}"));
+
+        let result: Value =
+            serde_json::from_str(&fs::read_to_string(&work).unwrap()).unwrap();
+        let expected: Value =
+            serde_json::from_str(&fs::read_to_string(&expected_path).unwrap()).unwrap();
+
+        assert_eq!(result, expected, "fixture '{stem}' did not match expected after merge");
+        pairs_tested += 1;
+    }
+
+    assert!(pairs_tested >= 5, "expected at least 5 fixture pairs, found {pairs_tested}");
 }
 
 /// Preserved keys from the full-sample fixture are all present in the output.

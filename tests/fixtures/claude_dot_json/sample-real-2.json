@@ -1,0 +1,53 @@
+{
+  "oauthAccount": {
+    "accountUuid": "11111111-aaaa-bbbb-cccc-dddddddddddd",
+    "emailAddress": "user@redacted.example",
+    "organizationUuid": "22222222-aaaa-bbbb-cccc-dddddddddddd",
+    "hasExtraUsageEnabled": true,
+    "billingType": "stripe_subscription",
+    "displayName": "Redacted User",
+    "organizationRole": "owner",
+    "workspaceRole": null,
+    "organizationName": "Redacted Org"
+  },
+  "userID": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa1111",
+  "firstStartTime": "2025-01-15T09:00:00.000Z",
+  "claudeCodeFirstTokenDate": "2025-01-15T09:30:00.000Z",
+  "hasCompletedOnboarding": true,
+  "lastOnboardingVersion": "3.1.0",
+  "numStartups": 87,
+  "migrationVersion": 5,
+  "opusProMigrationComplete": true,
+  "cachedGrowthBookFeatures": {
+    "feature-x": true,
+    "feature-y": false,
+    "feature-z": true
+  },
+  "tipsHistory": {
+    "tip-login": true,
+    "tip-switch": true,
+    "tip-add": false
+  },
+  "projects": {
+    "/Users/redacted/work/project-alpha": {
+      "allowedTools": ["read", "write"],
+      "mcpServers": {}
+    },
+    "/Users/redacted/work/project-beta": {
+      "allowedTools": [],
+      "mcpServers": {
+        "memory": {
+          "command": "npx",
+          "args": ["-y", "@modelcontextprotocol/server-memory"]
+        }
+      }
+    },
+    "/Users/redacted/personal/side-project": {
+      "allowedTools": [],
+      "mcpServers": {}
+    }
+  },
+  "changelogLastFetched": "2025-11-01T00:00:00.000Z",
+  "promptQueueUseCount": 23,
+  "cachedChromeExtensionInstalled": false
+}
