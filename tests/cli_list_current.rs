@@ -115,11 +115,11 @@ fn cctx_current_subcommand_exits_3_with_phase3_message() {
 }
 
 #[test]
-fn cctx_list_with_corrupt_yaml_exits_1() {
+fn cctx_list_with_corrupt_yaml_exits_4() {
     let home = TempDir::new().unwrap();
     write_contexts(&home, ": invalid: yaml: {\n");
     cctx(&home)
         .assert()
-        .code(1)
+        .code(4)
         .stderr(predicate::str::contains("parse").or(predicate::str::contains("error")));
 }

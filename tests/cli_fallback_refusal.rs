@@ -60,7 +60,7 @@ fn cctx(cctx_home: &TempDir, claude_dir: &TempDir) -> Command {
     cmd
 }
 
-// test 6: switch refuses with exit 5 when fallback present (macOS only)
+// test 6: switch refuses with exit 4 when fallback present (macOS only)
 #[cfg(target_os = "macos")]
 #[test]
 fn cctx_switch_refuses_when_fallback_present() {
@@ -72,14 +72,14 @@ fn cctx_switch_refuses_when_fallback_present() {
         .arg("work")
         .assert()
         .failure()
-        .code(5)
+        .code(4)
         .stderr(predicate::str::contains("refusing to switch"))
         .stderr(predicate::str::contains(
             cred_path.to_string_lossy().as_ref(),
         ));
 }
 
-// test 7: add refuses with exit 5 when fallback present (macOS only)
+// test 7: add refuses with exit 4 when fallback present (macOS only)
 #[cfg(target_os = "macos")]
 #[test]
 fn cctx_add_refuses_when_fallback_present() {
@@ -96,11 +96,11 @@ fn cctx_add_refuses_when_fallback_present() {
         .args(["add", "newctx"])
         .assert()
         .failure()
-        .code(5)
+        .code(4)
         .stderr(predicate::str::contains("refusing to switch"));
 }
 
-// test 8: delete refuses with exit 5 when fallback present (macOS only)
+// test 8: delete refuses with exit 4 when fallback present (macOS only)
 #[cfg(target_os = "macos")]
 #[test]
 fn cctx_delete_refuses_when_fallback_present() {
@@ -111,7 +111,7 @@ fn cctx_delete_refuses_when_fallback_present() {
         .args(["delete", "work"])
         .assert()
         .failure()
-        .code(5)
+        .code(4)
         .stderr(predicate::str::contains("refusing to switch"));
 }
 

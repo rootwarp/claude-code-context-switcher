@@ -29,26 +29,15 @@ fn main() {
     match cli::run() {
         Ok(()) => {}
         Err(e) => {
-            // Check for CredentialsJsonFallback first — print the long help text and suppress
-            // the short error line (the long message is self-describing).
             if let Some(Error::CredentialsJsonFallback { path }) = e.downcast_ref::<Error>() {
                 eprintln!("{}", cli::format_credentials_json_fallback_help(path));
-                std::process::exit(5);
+                std::process::exit(4); // was 5 — corrected to 4 (config corruption)
             }
-
             eprintln!("error: {e:#}");
-            let msg = format!("{e:#}");
-            // Full exit-code taxonomy lands in issue 4.4; string-match bridge for now.
-            let code = if msg.contains("not implemented") {
-                3
-            } else if msg.contains("partial state")
-                || msg.contains("another cctx process")
-                || msg.contains("fallback mode")
-            {
-                5
-            } else {
-                1
-            };
+            let code = e
+                .downcast_ref::<Error>()
+                .map(Error::exit_code)
+                .unwrap_or(1);
             std::process::exit(code);
         }
     }

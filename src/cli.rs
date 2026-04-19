@@ -157,12 +157,7 @@ fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Return an informative error for active-context detection.
-///
-/// Active-context detection requires fingerprinting which lands in Phase 3.
-/// Exit code 3 is signalled by `main` when the error message contains "not implemented".
 fn handle_current() -> anyhow::Result<()> {
-    // Warn (do not refuse) when .credentials.json fallback is present.
     if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
         if let claude_state::FallbackState::Present { path, .. } =
             claude_state::detect_credentials_json_fallback(&claude_dir)
@@ -173,10 +168,10 @@ fn handle_current() -> anyhow::Result<()> {
             );
         }
     }
-    anyhow::bail!(
-        "active-context detection not implemented until Phase 3 (fingerprint module). \
-         Use `cctx list` to see configured contexts."
-    );
+    Err(Error::Unimplemented {
+        what: "active-context detection (lands in Phase 3 — use `cctx list` to see contexts)",
+    }
+    .into())
 }
 
 fn current_user_short_name() -> String {
@@ -277,7 +272,7 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
     refuse_if_dirty(&paths)?;
 
     let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|_| Error::ConcurrentAccess)?;
 
     let cf = config::load(&paths)?;
 
@@ -315,7 +310,10 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
                 Ok(())
             }
             switch_engine::NoOpReason::ContextNotFound => {
-                anyhow::bail!("context not found: {name}")
+                Err(Error::ContextNotFound {
+                    name: name.to_string(),
+                }
+                .into())
             }
             switch_engine::NoOpReason::NoContextsConfigured => {
                 anyhow::bail!("no contexts configured")
@@ -344,7 +342,7 @@ fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
     refuse_if_dirty(&paths)?;
 
     let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|_| Error::ConcurrentAccess)?;
 
     let mut cf = config::load(&paths)?;
 
@@ -480,10 +478,10 @@ fn try_capture_oauth(
 
 fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
     if oauth {
-        anyhow::bail!(
-            "--oauth interactive add is P1 (issue 6.1); for now, log in manually with \
-             `claude /login` then run `cctx add {name}` without --oauth"
-        );
+        return Err(Error::Unimplemented {
+            what: "--oauth interactive add (P1 issue 6.1 — run `claude /login` then `cctx add` without --oauth)",
+        }
+        .into());
     }
 
     // Refuse before any mutation if .credentials.json fallback is present.
@@ -500,7 +498,7 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
     refuse_if_dirty(&paths)?;
 
     let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|_| Error::ConcurrentAccess)?;
 
     let mut cf = config::load(&paths)?;
 
@@ -563,7 +561,10 @@ fn handle_rename() -> anyhow::Result<()> {
             return Err(Error::CredentialsJsonFallback { path }.into());
         }
     }
-    anyhow::bail!("rename is not implemented in v1 (P1 item — use `cctx delete` + `cctx add` to re-add under the new name)");
+    Err(Error::Unimplemented {
+        what: "rename (P1 — use `cctx delete` + `cctx add` to re-add under the new name)",
+    }
+    .into())
 }
 
 fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<()> {
@@ -582,7 +583,7 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
     ensure_config_dir(&paths)?;
 
     let _guard = lock::acquire_exclusive(&paths.lock_file, Duration::from_secs(5))
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|_| Error::ConcurrentAccess)?;
 
     // For DryRun/Commit we don't need stores; for Rollback we need them.
     let backend = build_backend();
@@ -621,7 +622,7 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
     }
 
     let report = doctor::diagnose_and_repair(&paths, stores_opt, mode)
-        .map_err(|e| anyhow::anyhow!("{e}"))?;
+        .map_err(|_| Error::ConcurrentAccess)?;
 
     if report.uncommitted_entries.is_empty() {
         eprintln!("journal is clean — no uncommitted entries");
@@ -649,14 +650,13 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
         eprintln!("  action: {action}");
     }
 
-    // Exit 5 if dirty in DryRun mode (caller checks exit code).
     if mode == RepairMode::DryRun && !report.uncommitted_entries.is_empty() {
-        // Signal dirty state: return an error so main maps to exit 5.
-        return Err(anyhow::anyhow!(
-            "partial state detected: {} uncommitted entr{} — run `cctx doctor --rollback` or `cctx doctor --commit`",
-            report.uncommitted_entries.len(),
-            if report.uncommitted_entries.len() == 1 { "y" } else { "ies" }
-        ));
+        let first = &report.uncommitted_entries[0];
+        return Err(Error::PartiallyAppliedState {
+            journal_id: first.id,
+            snapshot_path: first.snapshot_path.clone(),
+        }
+        .into());
     }
 
     Ok(())
@@ -695,11 +695,11 @@ fn check_dirty_journal(
 fn refuse_if_dirty(paths: &config::ConfigPaths) -> anyhow::Result<()> {
     let pending = check_dirty_journal(paths)?;
     if let Some(first) = pending.first() {
-        let err = Error::PartiallyAppliedState {
+        return Err(Error::PartiallyAppliedState {
             journal_id: first.id,
             snapshot_path: first.snapshot_path.clone(),
-        };
-        return Err(anyhow::anyhow!("{err}"));
+        }
+        .into());
     }
     Ok(())
 }

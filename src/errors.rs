@@ -174,6 +174,35 @@ pub enum Error {
     ContextCorrupt { name: String, detail: String },
 }
 
+impl Error {
+    /// Map this error variant to a process exit code.
+    ///
+    /// | Code | Category |
+    /// |------|----------|
+    /// | 1    | Unexpected / unclassified |
+    /// | 3    | Not found / not implemented |
+    /// | 4    | Config / parse corruption |
+    /// | 5    | Doctor-recoverable partial state |
+    /// | 6    | Manual restore required |
+    #[must_use]
+    pub const fn exit_code(&self) -> i32 {
+        match self {
+            Self::ContextNotFound { .. }
+            | Self::KeychainItemMissing { .. }
+            | Self::Unimplemented { .. } => 3,
+            Self::ContextsParseError { .. }
+            | Self::ClaudeStateParseError { .. }
+            | Self::SettingsParseError { .. }
+            | Self::CredentialsJsonFallback { .. } => 4,
+            Self::PartiallyAppliedState { .. }
+            | Self::ConcurrentAccess
+            | Self::VerifyFailed { .. } => 5,
+            Self::RollbackFailed { .. } => 6,
+            _ => 1,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -225,5 +254,47 @@ mod tests {
         assert!(e.to_string().contains("fingerprint mismatch"));
         assert!(e.to_string().contains("deadbeef"));
         assert!(e.to_string().contains("cafebabe"));
+    }
+
+    #[test]
+    fn rollback_failed_exits_6() {
+        let e = Error::RollbackFailed {
+            attempted_stores: vec![],
+            path: PathBuf::from("/tmp/snap.json"),
+        };
+        assert_eq!(e.exit_code(), 6);
+    }
+
+    #[test]
+    fn context_not_found_exits_3() {
+        let e = Error::ContextNotFound {
+            name: "missing".to_string(),
+        };
+        assert_eq!(e.exit_code(), 3);
+    }
+
+    #[test]
+    fn partially_applied_state_exits_5() {
+        let e = Error::PartiallyAppliedState {
+            journal_id: 1,
+            snapshot_path: PathBuf::from("/tmp/snap.json"),
+        };
+        assert_eq!(e.exit_code(), 5);
+    }
+
+    #[test]
+    fn credentials_json_fallback_exits_4() {
+        let e = Error::CredentialsJsonFallback {
+            path: PathBuf::from("/home/user/.credentials.json"),
+        };
+        assert_eq!(e.exit_code(), 4);
+    }
+
+    #[test]
+    fn unimplemented_exits_3() {
+        let e = Error::Unimplemented {
+            what: "some feature",
+        };
+        assert_eq!(e.exit_code(), 3);
     }
 }
