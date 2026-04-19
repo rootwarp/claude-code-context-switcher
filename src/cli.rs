@@ -621,8 +621,7 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
         claude_state::FallbackState::Absent => {}
     }
 
-    let report = doctor::diagnose_and_repair(&paths, stores_opt, mode)
-        .map_err(|_| Error::ConcurrentAccess)?;
+    let report = doctor::diagnose_and_repair(&paths, stores_opt, mode)?;
 
     if report.uncommitted_entries.is_empty() {
         eprintln!("journal is clean — no uncommitted entries");
