@@ -73,6 +73,7 @@ fn cli_add_verbosity_does_not_leak() {
         .env("CCTX_HOME", tmp.path().join("cctx"))
         .env("CLAUDE_CONFIG_DIR", &claude_dir)
         .env("CCTX_TEST_IN_MEMORY_KEYCHAIN", "1")
+        .env_remove("RUST_LOG")
         .args(["-vvv", "add", "sentinel-ctx"])
         .output()
         .unwrap();
