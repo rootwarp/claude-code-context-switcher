@@ -95,23 +95,25 @@ contexts:
 }
 
 #[test]
-fn cctx_dash_c_exits_3_with_phase3_message() {
+fn cctx_dash_c_prints_unmanaged_when_no_match() {
     let home = TempDir::new().unwrap();
     cctx(&home)
         .arg("-c")
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("Phase 3"));
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("(unmanaged)"));
 }
 
 #[test]
-fn cctx_current_subcommand_exits_3_with_phase3_message() {
+fn cctx_current_subcommand_prints_unmanaged_when_no_match() {
     let home = TempDir::new().unwrap();
     cctx(&home)
         .arg("current")
         .assert()
-        .code(3)
-        .stderr(predicate::str::contains("Phase 3"));
+        .success()
+        .code(0)
+        .stdout(predicate::str::contains("(unmanaged)"));
 }
 
 #[test]

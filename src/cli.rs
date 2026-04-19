@@ -78,6 +78,8 @@ pub enum Command {
         #[arg(long, conflicts_with_all = ["dry_run", "rollback"])]
         commit: bool,
     },
+    /// List all stored contexts.
+    List,
     /// Emit a shell completion script.
     Completions { shell: Shell },
 }
@@ -126,7 +128,63 @@ pub fn format_credentials_json_fallback_help(path: &std::path::Path) -> String {
     format!("cctx: refusing to switch \u{2014} a credentials fallback file exists on this macOS\nmachine, which means Claude Code is NOT reading OAuth from the Keychain. cctx\nonly manages the Keychain-backed flow on macOS.\n\n  Fallback file: {p}\n\nThis usually means one of:\n  \u{2022} $CLAUDE_CONFIG_DIR is set, directing Claude Code to a custom root.\n  \u{2022} An SSH session with a locked Keychain forced Claude Code to the file\n    fallback.\n  \u{2022} A prior export of CLAUDE_CODE_OAUTH_TOKEN triggered upstream bug #37512,\n    which silently purges the Keychain entry on child-process exit.\n\nResolve by:\n  1. unset CLAUDE_CONFIG_DIR                                (if set)\n  2. rm {p}\n  3. claude /login                                          (repopulates Keychain)\n  4. retry cctx\n\nSee: https://github.com/anthropics/claude-code/issues/37512")
 }
 
-fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
+/// Detect which stored context matches the live Claude Code credential.
+///
+/// Tries API-key path first (settings.json), then OAuth path (Keychain + ~/.claude.json).
+/// Returns `Some(name)` on a fingerprint match, `None` if unmanaged or detection fails.
+fn detect_active_context(
+    cf: &config::ContextsFile,
+    backend: &dyn crate::credential_backend::CredentialBackend,
+    settings_path: &std::path::Path,
+    claude_dot_json_path: &std::path::Path,
+) -> Option<String> {
+    // API-key path: match fingerprint of the key in settings.json.
+    if let Ok(Some(key)) = claude_state::load_settings_api_key(settings_path) {
+        let fp = context::Fingerprint::from_api_key(&key);
+        if let Some(name) = cf
+            .contexts
+            .values()
+            .find(|c| matches!(c.auth_mode, context::AuthMode::ApiKey { .. }) && c.fingerprint == fp)
+            .map(|c| c.name.clone())
+        {
+            return Some(name);
+        }
+    }
+
+    // OAuth path: match fingerprint of the Keychain blob + ~/.claude.json identity.
+    let account = current_user_short_name();
+    if let Ok(blob_bytes) = backend.get_generic_password("Claude Code-credentials", &account) {
+        if let Ok(envelope) =
+            serde_json::from_slice::<claude_state::KeychainBlobEnvelope>(blob_bytes.expose())
+        {
+            if let Ok(dot_json) = claude_state::load_claude_dot_json(claude_dot_json_path) {
+                let user_id = dot_json.user_id;
+                let account_uuid = dot_json.oauth_account.map(|oa| oa.account_uuid);
+                if let (Some(uid), Some(uuid)) = (user_id, account_uuid) {
+                    let fp = fingerprint::compute_oauth(
+                        &uid,
+                        &uuid,
+                        &envelope.claude_ai_oauth.access_token,
+                    );
+                    if let Some(name) = cf
+                        .contexts
+                        .values()
+                        .find(|c| {
+                            matches!(c.auth_mode, context::AuthMode::OAuth) && c.fingerprint == fp
+                        })
+                        .map(|c| c.name.clone())
+                    {
+                        return Some(name);
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+fn handle_list() -> anyhow::Result<()> {
     let paths = config::resolve_paths()?;
     ensure_config_dir(&paths)?;
 
@@ -139,8 +197,7 @@ fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
         );
     }
 
-    // Warn (do not refuse) when .credentials.json fallback is present.
-    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
+    let fallback_present = if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
         if let claude_state::FallbackState::Present { path, .. } =
             claude_state::detect_credentials_json_fallback(&claude_dir)
         {
@@ -148,35 +205,65 @@ fn handle_list(active_marker: Option<&str>) -> anyhow::Result<()> {
                 "warning: .credentials.json exists at {} — active-context detection unavailable (run `cctx doctor`)",
                 path.display()
             );
+            true
+        } else {
+            false
         }
-    }
+    } else {
+        false
+    };
 
     let cf = config::load(&paths)?;
     if cf.contexts.is_empty() {
         eprintln!("no contexts configured. run `cctx add <name>` to create one.");
         return Ok(());
     }
-    for line in render_list(&cf, active_marker) {
+
+    let active = if fallback_present {
+        None
+    } else {
+        let backend = build_backend();
+        let settings_path = claude_state::resolve_settings_path()?;
+        let claude_dir = claude_state::resolve_claude_dir()?;
+        let claude_dot_json_path = claude_dir
+            .parent()
+            .map_or_else(|| claude_dir.join(".claude.json"), |h| h.join(".claude.json"));
+        detect_active_context(&cf, &*backend, &settings_path, &claude_dot_json_path)
+    };
+
+    for line in render_list(&cf, active.as_deref()) {
         println!("{line}");
     }
     Ok(())
 }
 
 fn handle_current() -> anyhow::Result<()> {
-    if let Ok(claude_dir) = claude_state::resolve_claude_dir() {
-        if let claude_state::FallbackState::Present { path, .. } =
-            claude_state::detect_credentials_json_fallback(&claude_dir)
-        {
-            eprintln!(
-                "warning: .credentials.json exists at {} — active-context detection unavailable (run `cctx doctor`)",
-                path.display()
-            );
-        }
+    let claude_dir = claude_state::resolve_claude_dir()?;
+    if let claude_state::FallbackState::Present { path, .. } =
+        claude_state::detect_credentials_json_fallback(&claude_dir)
+    {
+        eprintln!(
+            "warning: .credentials.json exists at {} — active-context detection unavailable (run `cctx doctor`)",
+            path.display()
+        );
+        println!("(unmanaged)");
+        return Ok(());
     }
-    Err(Error::Unimplemented {
-        what: "active-context detection (lands in Phase 3 — use `cctx list` to see contexts)",
+
+    let paths = config::resolve_paths()?;
+    let cf = config::load(&paths)?;
+
+    let backend = build_backend();
+    let settings_path = claude_state::resolve_settings_path()?;
+    let claude_dot_json_path = claude_dir
+        .parent()
+        .map_or_else(|| claude_dir.join(".claude.json"), |h| h.join(".claude.json"));
+
+    match detect_active_context(&cf, &*backend, &settings_path, &claude_dot_json_path) {
+        Some(name) => println!("{name}"),
+        None => println!("(unmanaged)"),
     }
-    .into())
+    Ok(())
 }
 
 fn current_user_short_name() -> String {
@@ -711,7 +798,7 @@ fn refuse_if_dirty(paths: &config::ConfigPaths) -> anyhow::Result<()> {
 #[allow(clippy::needless_pass_by_value)]
 fn dispatch(cli: Cli) -> anyhow::Result<()> {
     match (cli.cmd, cli.name, cli.current) {
-        (None, None, false) => handle_list(None),
+        (None, None, false) | (Some(Command::List), _, _) => handle_list(),
         (None, _, true) | (Some(Command::Current), _, _) => handle_current(),
         (Some(Command::Switch { name }), _, _) | (None, Some(name), false) => handle_switch(&name),
         (Some(Command::Add { name, oauth }), _, _) => handle_add(&name, oauth),
@@ -863,25 +950,21 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_current_variants_return_err() {
+    fn dispatch_current_variants_succeed() {
         let current_variants: Vec<Cli> = vec![
             Cli::try_parse_from(["cctx", "-c"]).unwrap(),
             Cli::try_parse_from(["cctx", "current"]).unwrap(),
         ];
         for cli in current_variants {
-            let err = dispatch(cli).unwrap_err();
-            assert!(
-                err.to_string().contains("not implemented"),
-                "expected 'not implemented' in error, got: {err}"
-            );
+            // Should succeed (prints "(unmanaged)" when no context matches).
+            dispatch(cli).expect("cctx -c / current should not error");
         }
     }
 
     #[test]
-    fn handle_current_returns_unimplemented_error() {
-        let err = handle_current().unwrap_err();
-        assert!(err.to_string().contains("Phase 3"));
-        assert!(err.to_string().contains("not implemented"));
+    fn handle_current_succeeds_with_no_contexts() {
+        // With an empty or absent config, detect_active_context returns None → prints "(unmanaged)".
+        handle_current().expect("handle_current should not error");
     }
 
     #[test]

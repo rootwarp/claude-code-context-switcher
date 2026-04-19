@@ -132,19 +132,20 @@ fn cctx_list_warns_but_continues_when_fallback_present() {
 }
 
 // test 10: cctx -c emits warning then exits with code 3 (not-implemented) when fallback present
-// (macOS only; on non-macOS no warning but still exits 3 due to unimplemented)
+// When .credentials.json fallback is present, detection is unavailable → warn + print "(unmanaged)" + exit 0.
 #[cfg(target_os = "macos")]
 #[test]
-fn cctx_current_exits_3_with_fallback_warning_when_present() {
+fn cctx_current_warns_and_prints_unmanaged_when_fallback_present() {
     let (cctx_home, claude_dir) = setup();
     seed_fallback(&claude_dir);
 
     cctx(&cctx_home, &claude_dir)
         .arg("-c")
         .assert()
-        .failure()
-        .code(3)
-        .stderr(predicate::str::contains(".credentials.json"));
+        .success()
+        .code(0)
+        .stderr(predicate::str::contains(".credentials.json"))
+        .stdout(predicate::str::contains("(unmanaged)"));
 }
 
 // test 11: doctor proceeds when fallback present and reports it (macOS only)

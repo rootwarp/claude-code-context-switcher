@@ -172,7 +172,10 @@ contexts:
         .stdout
         .clone();
     let stdout = String::from_utf8(output).unwrap();
-    let names: Vec<&str> = stdout.lines().map(str::trim).collect();
+    let names: Vec<&str> = stdout
+        .lines()
+        .map(|l| l.trim_start_matches(|c: char| c == '*' || c == ' '))
+        .collect();
     assert_eq!(names, vec!["a", "z", "m"], "order must be a, z, m");
 }
 
