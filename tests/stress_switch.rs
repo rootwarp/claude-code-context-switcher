@@ -4,6 +4,7 @@ use assert_cmd::Command;
 use claude_code_context_switcher::context::Fingerprint;
 use claude_code_context_switcher::secret::Secret;
 use std::fs;
+use std::process::Command as StdCommand;
 use tempfile::TempDir;
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -187,4 +188,52 @@ fn stress_corrupted_journal_line_is_rejected() {
         .arg("ctx-a")
         .assert()
         .failure();
+}
+
+/// 5 concurrent `cctx ctx-a` invocations: exactly 1 succeeds, 4 exit with ConcurrentAccess (5).
+///
+/// Uses `CCTX_LOCK_TIMEOUT_MS=0` so blocked processes immediately fail rather than retrying,
+/// making the outcome deterministic.
+#[test]
+fn five_concurrent_switches_one_wins() {
+    let cctx_home = TempDir::new().unwrap();
+    let claude_dir = TempDir::new().unwrap();
+
+    fs::write(cctx_home.path().join("contexts.yaml"), two_context_yaml()).unwrap();
+
+    let bin = env!("CARGO_BIN_EXE_cctx");
+
+    // Spawn 5 processes concurrently before waiting for any.
+    let handles: Vec<_> = (0..5)
+        .map(|_| {
+            StdCommand::new(bin)
+                .arg("ctx-a")
+                .env("CCTX_HOME", cctx_home.path())
+                .env("CLAUDE_CONFIG_DIR", claude_dir.path())
+                .env("CCTX_TEST_IN_MEMORY_KEYCHAIN", "1")
+                .env("CCTX_LOCK_TIMEOUT_MS", "0")
+                .spawn()
+                .expect("failed to spawn cctx")
+        })
+        .collect();
+
+    let statuses: Vec<_> = handles
+        .into_iter()
+        .map(|mut c| c.wait().expect("failed to wait for cctx"))
+        .collect();
+
+    let successes = statuses.iter().filter(|s| s.success()).count();
+    let concurrent_errors = statuses
+        .iter()
+        .filter(|s| s.code() == Some(5))
+        .count();
+
+    assert_eq!(
+        successes, 1,
+        "exactly 1 of 5 concurrent switches should succeed; got {successes}"
+    );
+    assert_eq!(
+        concurrent_errors, 4,
+        "the 4 losing processes should exit 5 (ConcurrentAccess); got {concurrent_errors}"
+    );
 }

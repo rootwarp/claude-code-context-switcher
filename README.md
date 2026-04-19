@@ -120,3 +120,15 @@ If your version differs, cctx may still work, but the Keychain attribute schema,
 3. Update this README.
 
 Disable Claude Code auto-update on the dev machine during active cctx development to avoid mid-sprint schema surprises.
+
+## Running the stress suite
+
+Requires two OAuth contexts (`personal`, `work`) and one API-key context (`console-key`) pre-seeded via `cctx add`.
+
+```bash
+# 20-switch Keychain orphan test (macOS, requires real Keychain)
+CCTX_REAL_KEYCHAIN=1 cargo test --test stress_keychain -- --ignored --test-threads=1
+
+# Performance benchmarks (requires hyperfine)
+CCTX_BENCH=1 cargo test --test bench_hyperfine -- --ignored --test-threads=1
+```
