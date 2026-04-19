@@ -1,17 +1,25 @@
-//! `Secret<T>` newtype with redacted `Display`/`Debug`; memory-zeroize on drop.
+//! `Secret<T>` newtype with redacted `Display`/`Debug` and zeroize on drop.
 
 use serde::{Deserialize, Serialize};
+use zeroize::Zeroize;
 
 /// Wrapper that prevents secrets from leaking via `Debug`/`Display`.
 ///
-/// `Debug` and `Display` always render `"***"`.
+/// `Debug` renders `"Secret(***)"` and `Display` renders `"***"`.
 /// `Serialize`/`Deserialize` are transparent so YAML config can store and
-/// reload keys verbatim.  Full `zeroize` on `Drop` lands in issue 4.1.
+/// reload keys verbatim.  `Drop` calls `zeroize()` on the inner value.
+///
+/// The `T: Zeroize` bound is required on the struct so that the `Drop` impl
+/// can guarantee zeroization.  All types used as secrets in this codebase
+/// (`String`, `Vec<u8>`) implement `Zeroize`.
+// `into_inner` contains an `unsafe` block (ManuallyDrop + ptr::read) that is
+// unrelated to deserialization; suppress the false-positive clippy lint.
+#[allow(clippy::unsafe_derive_deserialize)]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(transparent)]
-pub struct Secret<T>(T);
+pub struct Secret<T: Zeroize>(T);
 
-impl<T> Secret<T> {
+impl<T: Zeroize> Secret<T> {
     /// Wrap a secret value.
     #[must_use]
     pub const fn new(v: T) -> Self {
@@ -23,23 +31,41 @@ impl<T> Secret<T> {
     pub const fn expose(&self) -> &T {
         &self.0
     }
+
+    /// Consume the wrapper and return the inner value without running `Drop`.
+    ///
+    /// When calling this method the caller takes responsibility for the value;
+    /// it will NOT be zeroized automatically.
+    #[must_use]
+    pub fn into_inner(self) -> T {
+        let me = std::mem::ManuallyDrop::new(self);
+        // SAFETY: `me` is ManuallyDrop, so Secret's Drop will not run.
+        // We read the T directly, taking ownership of the value.
+        unsafe { std::ptr::read(&me.0) }
+    }
 }
 
-impl<T: Eq> Eq for Secret<T> {}
+impl<T: Zeroize> Drop for Secret<T> {
+    fn drop(&mut self) {
+        self.0.zeroize();
+    }
+}
 
-impl<T> std::fmt::Debug for Secret<T> {
+impl<T: Zeroize + Eq> Eq for Secret<T> {}
+
+impl<T: Zeroize> std::fmt::Debug for Secret<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "Secret(***)")
+    }
+}
+
+impl<T: Zeroize> std::fmt::Display for Secret<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "***")
     }
 }
 
-impl<T> std::fmt::Display for Secret<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "***")
-    }
-}
-
-impl<T: PartialEq> PartialEq for Secret<T> {
+impl<T: Zeroize + PartialEq> PartialEq for Secret<T> {
     fn eq(&self, other: &Self) -> bool {
         self.0 == other.0
     }
@@ -61,6 +87,12 @@ mod tests {
             dbg.contains("***"),
             "debug must contain *** redaction: {dbg}"
         );
+    }
+
+    #[test]
+    fn debug_format_is_secret_triple_star() {
+        let s = Secret::new("sk-ant-oat01-REAL".to_string());
+        assert_eq!(format!("{s:?}"), "Secret(***)");
     }
 
     #[test]
@@ -93,5 +125,25 @@ mod tests {
         assert_eq!(json, r#""sk-ant-test""#);
         let back: Secret<String> = serde_json::from_str(&json).unwrap();
         assert_eq!(s, back);
+    }
+
+    #[test]
+    fn into_inner_returns_value() {
+        let s = Secret::new(42u32);
+        assert_eq!(s.into_inner(), 42);
+    }
+
+    #[test]
+    fn into_inner_string_returns_value() {
+        let s = Secret::new("hello".to_string());
+        assert_eq!(s.into_inner(), "hello");
+    }
+
+    #[test]
+    fn drop_zeroizes_vec() {
+        // Verify the Zeroize impl that Secret<Vec<u8>>::drop() calls actually zeroes memory.
+        let mut v: Vec<u8> = vec![1, 2, 3];
+        Zeroize::zeroize(&mut v);
+        assert!(v.iter().all(|&b| b == 0), "Zeroize must clear all bytes");
     }
 }
