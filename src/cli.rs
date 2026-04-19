@@ -292,10 +292,29 @@ fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
         }
     }
 
-    // Phase 3: sweep cctx-owned Keychain items here.
-    // For Phase 1 this is a documented no-op stub.
-    // TODO(phase-3): credential_backend::enumerate_by_service_prefix(&format!("cctx-context-{name}"))
-    //                then delete each returned ItemHandle.
+    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
+    #[cfg(feature = "real-keychain")]
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> = if use_in_memory {
+        Box::new(InMemoryBackend::new())
+    } else {
+        Box::new(SecurityFrameworkBackend::new())
+    };
+    #[cfg(not(feature = "real-keychain"))]
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> = {
+        let _ = use_in_memory;
+        Box::new(InMemoryBackend::new())
+    };
+
+    for prefix in &[
+        format!("cctx-context-{name}"),
+        format!("cctx-oauth-{name}"),
+    ] {
+        if let Ok(items) = backend.enumerate_by_service_prefix(prefix) {
+            for item in items {
+                let _ = backend.delete_generic_password(&item.service, &item.account);
+            }
+        }
+    }
 
     cf.contexts.shift_remove(name);
     config::save(&paths, &cf)?;
@@ -378,8 +397,7 @@ fn handle_rename() -> anyhow::Result<()> {
             return Err(Error::CredentialsJsonFallback { path }.into());
         }
     }
-    eprintln!("not implemented in v1");
-    Ok(())
+    anyhow::bail!("rename is not implemented in v1 (P1 item — use `cctx delete` + `cctx add` to re-add under the new name)");
 }
 
 fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<()> {
@@ -401,8 +419,18 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // For DryRun/Commit we don't need stores; for Rollback we need them.
-    // Phase 2: InMemoryBackend only.
-    let backend = InMemoryBackend::new();
+    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
+    #[cfg(feature = "real-keychain")]
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> = if use_in_memory {
+        Box::new(InMemoryBackend::new())
+    } else {
+        Box::new(SecurityFrameworkBackend::new())
+    };
+    #[cfg(not(feature = "real-keychain"))]
+    let backend: Box<dyn crate::credential_backend::CredentialBackend> = {
+        let _ = use_in_memory;
+        Box::new(InMemoryBackend::new())
+    };
     let settings_path = claude_state::resolve_settings_path()?;
     let claude_dir = claude_state::resolve_claude_dir()?;
     let claude_dot_json_path = claude_dir.parent().map_or_else(
@@ -411,7 +439,7 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
     );
 
     let stores = switch_engine::Stores {
-        backend: &backend,
+        backend: backend.as_ref(),
         keychain_service: "Claude Code-credentials",
         keychain_account: &current_user_short_name(),
         claude_dot_json_path: &claude_dot_json_path,
