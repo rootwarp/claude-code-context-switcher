@@ -2,10 +2,7 @@
 
 use std::path::PathBuf;
 
-/// Library-layer errors.
-///
-/// Only the variants needed by Phase-1 issues land here.  The full 17-variant
-/// taxonomy (Phase 4) grows this enum incrementally.
+/// `Error` covers every failure mode in cctx. Variants match arch §8 (19 variants).
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// `contexts.yaml` is absent or cannot be opened.

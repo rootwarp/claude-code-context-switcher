@@ -391,7 +391,7 @@ fn execute_oauth_switch(
     ) {
         return rollback_and_report(
             entry_id,
-            Error::KeychainBackend { source: e }.to_string(),
+            Error::KeychainWriteFailed { source: e }.to_string(),
             &snap,
             stores,
             journal,
@@ -696,6 +696,11 @@ fn save_live_blob_to_mirror(
     let live_blob = match backend.get_generic_password(live_service, live_account) {
         Ok(b) => b,
         Err(BackendError::NotFound) => return Ok(()),
+        Err(BackendError::AccessDenied) => {
+            return Err(Error::KeychainAccessDenied {
+                service: live_service.to_string(),
+            })
+        }
         Err(e) => return Err(Error::KeychainBackend { source: e }),
     };
 
@@ -709,7 +714,7 @@ fn save_live_blob_to_mirror(
                 ..Default::default()
             },
         )
-        .map_err(|e| Error::KeychainBackend { source: e })
+        .map_err(|e| Error::KeychainWriteFailed { source: e })
 }
 
 /// Build the canonical JSON bytes used to verify `ClaudeDotJson` after merge.
