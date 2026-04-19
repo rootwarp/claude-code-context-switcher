@@ -8,9 +8,10 @@ use clap_complete::Shell;
 use crate::claude_state;
 use crate::config::{self, ContextsFile};
 use crate::context::{self, AuthMode, Fingerprint, IdentityMetadata, SecretRef};
-use crate::credential_backend::InMemoryBackend;
+use crate::credential_backend::{BackendError, CredentialBackend, InMemoryBackend, PasswordOptions};
 use crate::doctor::{self, RepairMode};
 use crate::errors::Error;
+use crate::fingerprint;
 use crate::journal::Journal;
 use crate::lock;
 use crate::switch_engine;
@@ -181,6 +182,73 @@ fn current_user_short_name() -> String {
     std::env::var("USER").unwrap_or_else(|_| "default".to_string())
 }
 
+/// Build the credential backend, seeding the in-memory backend from
+/// `CCTX_TEST_KEYCHAIN_BLOB` when that env var is set (test hook only).
+///
+/// `CCTX_TEST_KEYCHAIN_BLOB` must be the raw JSON of a `KeychainBlobEnvelope`.
+/// It is stored under `("Claude Code-credentials", current_user_short_name())`.
+fn build_backend() -> Box<dyn crate::credential_backend::CredentialBackend> {
+    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
+    #[cfg(feature = "real-keychain")]
+    {
+        if use_in_memory {
+            Box::new(seed_in_memory_backend())
+        } else {
+            Box::new(SecurityFrameworkBackend::new())
+        }
+    }
+    #[cfg(not(feature = "real-keychain"))]
+    {
+        let _ = use_in_memory;
+        Box::new(seed_in_memory_backend())
+    }
+}
+
+fn seed_in_memory_backend() -> InMemoryBackend {
+    let backend = InMemoryBackend::new();
+    if let Ok(blob_json) = std::env::var("CCTX_TEST_KEYCHAIN_BLOB") {
+        let _ = backend.set_generic_password(
+            "Claude Code-credentials",
+            &current_user_short_name(),
+            blob_json.as_bytes(),
+            PasswordOptions {
+                update_if_exists: true,
+                ..Default::default()
+            },
+        );
+    }
+    backend
+}
+
+/// Redact an email address for display.
+///
+/// Local part: keep all but last 2 chars, replace last 2 with `**`.
+/// Domain: keep first 2 chars of the name, replace rest with `*****`, keep TLD.
+fn redact_email(email: &str) -> String {
+    let (local, domain) = email.split_once('@').unwrap_or((email, ""));
+    let local_redacted = if local.len() <= 2 {
+        "**".to_string()
+    } else {
+        format!("{}**", &local[..local.len() - 2])
+    };
+    if domain.is_empty() {
+        return local_redacted;
+    }
+    let domain_redacted = domain.rfind('.').map_or_else(
+        || format!("{}*****", &domain[..domain.len().min(2)]),
+        |dot_pos| {
+            let name = &domain[..dot_pos];
+            let tld = &domain[dot_pos..];
+            if name.len() <= 2 {
+                format!("{name}*****{tld}")
+            } else {
+                format!("{}*****{tld}", &name[..2])
+            }
+        },
+    );
+    format!("{local_redacted}@{domain_redacted}")
+}
+
 fn handle_switch(name: &str) -> anyhow::Result<()> {
     let paths = config::resolve_paths()?;
     ensure_config_dir(&paths)?;
@@ -191,21 +259,7 @@ fn handle_switch(name: &str) -> anyhow::Result<()> {
 
     let cf = config::load(&paths)?;
 
-    // Use real Keychain backend when compiled with the real-keychain feature.
-    // Integration tests set CCTX_TEST_IN_MEMORY_KEYCHAIN=1 to force InMemoryBackend
-    // and avoid SecurityAgent dialogs that would deadlock subprocess-based tests.
-    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
-    #[cfg(feature = "real-keychain")]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> = if use_in_memory {
-        Box::new(InMemoryBackend::new())
-    } else {
-        Box::new(SecurityFrameworkBackend::new())
-    };
-    #[cfg(not(feature = "real-keychain"))]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> = {
-        let _ = use_in_memory;
-        Box::new(InMemoryBackend::new())
-    };
+    let backend = build_backend();
 
     let settings_path = claude_state::resolve_settings_path()?;
     let claude_dir = claude_state::resolve_claude_dir()?;
@@ -292,18 +346,7 @@ fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
         }
     }
 
-    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
-    #[cfg(feature = "real-keychain")]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> = if use_in_memory {
-        Box::new(InMemoryBackend::new())
-    } else {
-        Box::new(SecurityFrameworkBackend::new())
-    };
-    #[cfg(not(feature = "real-keychain"))]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> = {
-        let _ = use_in_memory;
-        Box::new(InMemoryBackend::new())
-    };
+    let backend = build_backend();
 
     // Best-effort: Keychain sweep failures warn but never block the config delete.
     for prefix in &[
@@ -333,6 +376,81 @@ fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
     config::save(&paths, &cf)?;
     eprintln!("deleted {name}");
     Ok(())
+}
+
+/// Try to capture the live OAuth session from the Claude Code Keychain item.
+///
+/// Returns `Ok(Some(ctx))` when a blob is found and all identity fields are present.
+/// Returns `Ok(None)` when no `Claude Code-credentials` item exists (fall through to API-key path).
+/// Returns `Err` when the blob is malformed or `~/.claude.json` is missing required fields.
+fn try_capture_oauth(
+    name: &str,
+    backend: &dyn CredentialBackend,
+) -> anyhow::Result<Option<context::Context>> {
+    let blob_bytes = match backend.get_generic_password(
+        "Claude Code-credentials",
+        &current_user_short_name(),
+    ) {
+        Ok(b) => b,
+        Err(BackendError::NotFound) => return Ok(None),
+        Err(e) => anyhow::bail!("keychain error reading Claude Code credentials: {e}"),
+    };
+
+    let envelope: claude_state::KeychainBlobEnvelope = serde_json::from_slice(blob_bytes.expose())
+        .map_err(|e| anyhow::anyhow!("keychain blob is not valid JSON: {e}"))?;
+
+    let claude_dir = claude_state::resolve_claude_dir()?;
+    let claude_dot_json_path = claude_dir.parent().map_or_else(
+        || claude_dir.join(".claude.json"),
+        |h| h.join(".claude.json"),
+    );
+    let dot_json = claude_state::load_claude_dot_json(&claude_dot_json_path)
+        .map_err(|e| anyhow::anyhow!("failed to read ~/.claude.json: {e}"))?;
+
+    let user_id = dot_json.user_id.ok_or_else(|| {
+        anyhow::anyhow!(
+            "~/.claude.json has no userID field — run `claude /login` to populate it"
+        )
+    })?;
+    let oauth_account = dot_json.oauth_account.ok_or_else(|| {
+        anyhow::anyhow!(
+            "~/.claude.json has no oauthAccount field — run `claude /login` to populate it"
+        )
+    })?;
+
+    let fp = fingerprint::compute_oauth(
+        &user_id,
+        &oauth_account.account_uuid,
+        &envelope.claude_ai_oauth.access_token,
+    );
+
+    let mirror_service = format!("cctx-oauth-{name}");
+    backend
+        .set_generic_password(
+            &mirror_service,
+            &current_user_short_name(),
+            blob_bytes.expose(),
+            PasswordOptions {
+                update_if_exists: true,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| anyhow::anyhow!("failed to mirror OAuth blob to keychain: {e}"))?;
+
+    Ok(Some(context::Context {
+        name: name.to_string(),
+        auth_mode: AuthMode::OAuth,
+        identity: IdentityMetadata {
+            user_id: Some(user_id),
+            account_uuid: Some(oauth_account.account_uuid.clone()),
+            email_hint: Some(redact_email(&oauth_account.email_address)),
+            oauth_account: Some(oauth_account),
+            label: None,
+        },
+        fingerprint: fp,
+        created_at: chrono::Utc::now(),
+        secret_ref: SecretRef::ClaudeCodeKeychain,
+    }))
 }
 
 fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
@@ -365,13 +483,47 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
         anyhow::bail!("context already exists: {name}. use `cctx delete {name}` first to replace.");
     }
 
+    let backend = build_backend();
+
+    // ── OAuth capture path ────────────────────────────────────────────────────
+    if let Some(ctx) = try_capture_oauth(name, &*backend)? {
+        cf.contexts.insert(name.to_string(), ctx);
+        config::save(&paths, &cf)?;
+        eprintln!("captured {name} as OAuth context (mirror: cctx-oauth-{name})");
+        return Ok(());
+    }
+
+    // ── API-key capture path ──────────────────────────────────────────────────
     let settings_path = claude_state::resolve_settings_path()?;
     let api_key = claude_state::load_settings_api_key(&settings_path)?;
 
     match api_key {
         Some(key) => {
             let base_url = claude_state::load_settings_base_url(&settings_path)?;
-            let fingerprint = Fingerprint::from_api_key(&key);
+            let fp = Fingerprint::from_api_key(&key);
+
+            // Best-effort: store key in cctx-owned keychain item; fall back to plaintext.
+            let keychain_service = format!("cctx-context-{name}");
+            let keychain_account = current_user_short_name();
+            let secret_ref = match backend.set_generic_password(
+                &keychain_service,
+                &keychain_account,
+                key.expose().as_bytes(),
+                PasswordOptions {
+                    update_if_exists: false,
+                    ..Default::default()
+                },
+            ) {
+                Ok(()) => SecretRef::Keychain {
+                    service: keychain_service,
+                    account: keychain_account,
+                },
+                Err(e) => {
+                    eprintln!("warning: could not write API key to keychain ({e}); storing plaintext");
+                    SecretRef::Plaintext { value: key }
+                }
+            };
+
             let ctx = context::Context {
                 name: name.to_string(),
                 auth_mode: AuthMode::ApiKey { base_url },
@@ -382,9 +534,9 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
                     )),
                     ..Default::default()
                 },
-                fingerprint,
+                fingerprint: fp,
                 created_at: chrono::Utc::now(),
-                secret_ref: SecretRef::Plaintext { value: key },
+                secret_ref,
             };
             cf.contexts.insert(name.to_string(), ctx);
             config::save(&paths, &cf)?;
@@ -393,9 +545,8 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
         }
         None => {
             anyhow::bail!(
-                "no active API-key identity found in ~/.claude/settings.json. \
-                 Run `claude /login` first, then re-run `cctx add {name}`. \
-                 OAuth capture lands in Phase 3."
+                "no active identity found — neither an OAuth session nor an API key is configured.\n\
+                 Run `claude /login` to authenticate, then re-run `cctx add {name}`."
             );
         }
     }
@@ -432,18 +583,7 @@ fn handle_doctor(dry_run: bool, rollback: bool, commit: bool) -> anyhow::Result<
         .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     // For DryRun/Commit we don't need stores; for Rollback we need them.
-    let use_in_memory = std::env::var_os("CCTX_TEST_IN_MEMORY_KEYCHAIN").is_some();
-    #[cfg(feature = "real-keychain")]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> = if use_in_memory {
-        Box::new(InMemoryBackend::new())
-    } else {
-        Box::new(SecurityFrameworkBackend::new())
-    };
-    #[cfg(not(feature = "real-keychain"))]
-    let backend: Box<dyn crate::credential_backend::CredentialBackend> = {
-        let _ = use_in_memory;
-        Box::new(InMemoryBackend::new())
-    };
+    let backend = build_backend();
     let settings_path = claude_state::resolve_settings_path()?;
     let claude_dir = claude_state::resolve_claude_dir()?;
     let claude_dot_json_path = claude_dir.parent().map_or_else(
