@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-/// `Error` covers every failure mode in cctx. Variants match arch §8 (19 variants).
+/// `Error` covers every failure mode in cctx.
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
     /// `contexts.yaml` is absent or cannot be opened.
