@@ -385,8 +385,8 @@ fn fault_at_claude_json_write_rolls_back_settings() {
     std::fs::set_permissions(cdj_parent, std::fs::Permissions::from_mode(0o755)).unwrap();
 
     assert!(
-        matches!(&result, Ok(SwitchOutcome::RolledBack { .. }) | Err(Error::RollbackFailed { .. })),
-        "expected RolledBack or RollbackFailed, got: {result:?}"
+        matches!(result, Ok(SwitchOutcome::RolledBack { .. })),
+        "expected RolledBack, got: {result:?}"
     );
 
     let settings: serde_json::Value =
@@ -447,8 +447,8 @@ fn fault_at_keychain_set_rolls_back_all_stores() {
     let result = execute_switch(&cf, "work", &stores, &mut journal, &env.paths);
 
     assert!(
-        matches!(&result, Ok(SwitchOutcome::RolledBack { .. }) | Err(Error::RollbackFailed { .. })),
-        "expected RolledBack or RollbackFailed, got: {result:?}"
+        matches!(result, Ok(SwitchOutcome::RolledBack { .. })),
+        "expected RolledBack, got: {result:?}"
     );
 
     let settings: serde_json::Value =
@@ -465,5 +465,10 @@ fn fault_at_keychain_set_rolls_back_all_stores() {
         cdj.user_id.as_deref(),
         Some("user-orig"),
         "claude.json must be restored to original content"
+    );
+    assert_eq!(
+        cdj.oauth_account.as_ref().map(|a| a.account_uuid.as_str()),
+        Some("uuid-orig"),
+        "oauth_account must be restored to original content after rollback"
     );
 }
