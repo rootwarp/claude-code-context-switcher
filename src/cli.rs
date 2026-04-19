@@ -220,29 +220,50 @@ fn seed_in_memory_backend() -> InMemoryBackend {
     backend
 }
 
+/// Return `&s[..n_chars]` using char-count rather than byte length.
+fn char_prefix(s: &str, n_chars: usize) -> &str {
+    match s.char_indices().nth(n_chars) {
+        Some((byte_pos, _)) => &s[..byte_pos],
+        None => s,
+    }
+}
+
+/// Return the leading chars of `s` after dropping the last `drop_chars` chars.
+fn char_drop_suffix(s: &str, drop_chars: usize) -> &str {
+    let total = s.chars().count();
+    if drop_chars >= total {
+        return "";
+    }
+    match s.char_indices().nth(total - drop_chars) {
+        Some((byte_pos, _)) => &s[..byte_pos],
+        None => s,
+    }
+}
+
 /// Redact an email address for display.
 ///
 /// Local part: keep all but last 2 chars, replace last 2 with `**`.
 /// Domain: keep first 2 chars of the name, replace rest with `*****`, keep TLD.
 fn redact_email(email: &str) -> String {
     let (local, domain) = email.split_once('@').unwrap_or((email, ""));
-    let local_redacted = if local.len() <= 2 {
+    let local_char_count = local.chars().count();
+    let local_redacted = if local_char_count <= 2 {
         "**".to_string()
     } else {
-        format!("{}**", &local[..local.len() - 2])
+        format!("{}**", char_drop_suffix(local, 2))
     };
     if domain.is_empty() {
         return local_redacted;
     }
     let domain_redacted = domain.rfind('.').map_or_else(
-        || format!("{}*****", &domain[..domain.len().min(2)]),
-        |dot_pos| {
-            let name = &domain[..dot_pos];
-            let tld = &domain[dot_pos..];
-            if name.len() <= 2 {
+        || format!("{}*****", char_prefix(domain, 2)),
+        |dot_byte| {
+            let name = &domain[..dot_byte];
+            let tld = &domain[dot_byte..];
+            if name.chars().count() <= 2 {
                 format!("{name}*****{tld}")
             } else {
-                format!("{}*****{tld}", &name[..2])
+                format!("{}*****{tld}", char_prefix(name, 2))
             }
         },
     );
@@ -449,7 +470,10 @@ fn try_capture_oauth(
         },
         fingerprint: fp,
         created_at: chrono::Utc::now(),
-        secret_ref: SecretRef::ClaudeCodeKeychain,
+        secret_ref: SecretRef::Keychain {
+            service: format!("cctx-oauth-{name}"),
+            account: current_user_short_name(),
+        },
     }))
 }
 
@@ -501,29 +525,6 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
         Some(key) => {
             let base_url = claude_state::load_settings_base_url(&settings_path)?;
             let fp = Fingerprint::from_api_key(&key);
-
-            // Best-effort: store key in cctx-owned keychain item; fall back to plaintext.
-            let keychain_service = format!("cctx-context-{name}");
-            let keychain_account = current_user_short_name();
-            let secret_ref = match backend.set_generic_password(
-                &keychain_service,
-                &keychain_account,
-                key.expose().as_bytes(),
-                PasswordOptions {
-                    update_if_exists: false,
-                    ..Default::default()
-                },
-            ) {
-                Ok(()) => SecretRef::Keychain {
-                    service: keychain_service,
-                    account: keychain_account,
-                },
-                Err(e) => {
-                    eprintln!("warning: could not write API key to keychain ({e}); storing plaintext");
-                    SecretRef::Plaintext { value: key }
-                }
-            };
-
             let ctx = context::Context {
                 name: name.to_string(),
                 auth_mode: AuthMode::ApiKey { base_url },
@@ -536,7 +537,7 @@ fn handle_add(name: &str, oauth: bool) -> anyhow::Result<()> {
                 },
                 fingerprint: fp,
                 created_at: chrono::Utc::now(),
-                secret_ref,
+                secret_ref: SecretRef::Plaintext { value: key },
             };
             cf.contexts.insert(name.to_string(), ctx);
             config::save(&paths, &cf)?;
@@ -994,5 +995,36 @@ mod tests {
         let paths = config::resolve_paths().unwrap();
         let loaded = config::load(&paths).unwrap();
         assert!(!loaded.contexts.contains_key("myctx"));
+    }
+
+    // ── redact_email unit tests ───────────────────────────────────────────────
+
+    #[test]
+    fn redact_email_ascii_typical() {
+        assert_eq!(redact_email("alice@example.com"), "ali**@ex*****.com");
+    }
+
+    #[test]
+    fn redact_email_short_local_part() {
+        // 1-char local: too short to keep prefix
+        assert_eq!(redact_email("a@example.com"), "**@ex*****.com");
+        // 2-char local: both chars replaced
+        assert_eq!(redact_email("ab@example.com"), "**@ex*****.com");
+    }
+
+    #[test]
+    fn redact_email_accented_local_part() {
+        // 'ë' is 2 bytes but 1 char — char_drop_suffix must not panic
+        let result = redact_email("aë@example.com");
+        assert!(result.contains("**"), "should redact: {result}");
+        assert!(!result.is_empty());
+    }
+
+    #[test]
+    fn redact_email_accented_domain() {
+        // domain name starts with multi-byte char
+        let result = redact_email("user@éxample.com");
+        assert!(result.contains("**"), "should redact: {result}");
+        assert!(!result.is_empty());
     }
 }

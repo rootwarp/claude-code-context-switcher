@@ -58,20 +58,17 @@ fn cctx_add_captures_apikey_from_settings() {
         "expected api_key nested map, got: {:?}",
         ctx["auth_mode"]
     );
-    // secret_ref: keychain (key written to cctx-owned keychain item in InMemory backend)
+    // secret_ref must be plaintext (switch engine not yet ready for keychain API-key path)
     assert_eq!(
         ctx["secret_ref"]["kind"].as_str().unwrap(),
-        "keychain",
-        "expected kind: keychain, got: {:?}",
+        "plaintext",
+        "expected kind: plaintext, got: {:?}",
         ctx["secret_ref"]
     );
-    assert!(
-        ctx["secret_ref"]["service"]
-            .as_str()
-            .unwrap()
-            .contains("cctx-context-personal"),
-        "expected cctx-context-personal service, got: {:?}",
-        ctx["secret_ref"]["service"]
+    assert_eq!(
+        ctx["secret_ref"]["value"].as_str().unwrap(),
+        "sk-test",
+        "expected value sk-test"
     );
 }
 
@@ -230,9 +227,17 @@ fn add_captures_oauth_from_live_keychain() {
     );
     assert_eq!(
         ctx["secret_ref"]["kind"].as_str().unwrap(),
-        "claude_code_keychain",
-        "expected kind: claude_code_keychain, got: {:?}",
+        "keychain",
+        "expected kind: keychain (mirror item), got: {:?}",
         ctx["secret_ref"]
+    );
+    assert!(
+        ctx["secret_ref"]["service"]
+            .as_str()
+            .unwrap()
+            .starts_with("cctx-oauth-"),
+        "service should be cctx-oauth-test-ctx, got: {:?}",
+        ctx["secret_ref"]["service"]
     );
     assert_eq!(
         ctx["identity"]["account_uuid"].as_str().unwrap(),
@@ -271,15 +276,8 @@ fn add_captures_api_key_to_keychain_when_no_oauth() {
     );
     assert_eq!(
         ctx["secret_ref"]["kind"].as_str().unwrap(),
-        "keychain",
-        "expected kind: keychain (InMemory backend write succeeds), got: {:?}",
+        "plaintext",
+        "expected kind: plaintext (switch engine not yet ready for keychain API-key), got: {:?}",
         ctx["secret_ref"]
-    );
-    assert!(
-        ctx["secret_ref"]["service"]
-            .as_str()
-            .unwrap()
-            .starts_with("cctx-context-"),
-        "service should be cctx-context-key-ctx"
     );
 }
