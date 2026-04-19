@@ -26,6 +26,7 @@ thiserror = "1"
 anyhow = "1"
 tracing = "=0.1.44"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+regex = "1"
 tempfile = "=3.27.0"
 etcetera = "=0.11.0"
 fs2 = "0.4"

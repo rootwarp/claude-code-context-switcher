@@ -89,6 +89,7 @@ pub fn parse() -> Cli {
 /// Returns an error if argument parsing fails or a subcommand handler returns an error.
 pub fn run() -> anyhow::Result<()> {
     let cli = Cli::parse();
+    crate::logging::init(cli.verbose);
     dispatch(cli)
 }
 
