@@ -305,13 +305,26 @@ fn handle_delete(name: &str, force: bool) -> anyhow::Result<()> {
         Box::new(InMemoryBackend::new())
     };
 
+    // Best-effort: Keychain sweep failures warn but never block the config delete.
     for prefix in &[
         format!("cctx-context-{name}"),
         format!("cctx-oauth-{name}"),
     ] {
-        if let Ok(items) = backend.enumerate_by_service_prefix(prefix) {
-            for item in items {
-                let _ = backend.delete_generic_password(&item.service, &item.account);
+        match backend.enumerate_by_service_prefix(prefix) {
+            Ok(items) => {
+                for item in items {
+                    if let Err(e) =
+                        backend.delete_generic_password(&item.service, &item.account)
+                    {
+                        eprintln!(
+                            "warning: could not remove keychain item {}/{}: {e}",
+                            item.service, item.account
+                        );
+                    }
+                }
+            }
+            Err(e) => {
+                eprintln!("warning: could not enumerate keychain items for {prefix}: {e}");
             }
         }
     }
@@ -748,6 +761,10 @@ mod tests {
 
     // ── handle_delete unit tests ──────────────────────────────────────────────
 
+    // Serializes tests that mutate process-wide env vars (CCTX_HOME, CLAUDE_CONFIG_DIR)
+    // to prevent races under parallel `cargo test`.
+    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn make_contexts_file_with_key(name: &str, api_key: &str) -> ContextsFile {
         let key = Secret::new(api_key.to_string());
         let fp = Fingerprint::from_api_key(&key);
@@ -781,6 +798,7 @@ mod tests {
 
     #[test]
     fn handle_delete_unknown_context_errors() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let tmp = tempfile::TempDir::new().unwrap();
         let cf = make_contexts_file(&["alpha"]);
         write_contexts_file(tmp.path(), &cf);
@@ -796,6 +814,7 @@ mod tests {
 
     #[test]
     fn handle_delete_active_heuristic_blocks_without_force() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let cctx_tmp = tempfile::TempDir::new().unwrap();
         let claude_tmp = tempfile::TempDir::new().unwrap();
 
@@ -816,6 +835,7 @@ mod tests {
 
     #[test]
     fn handle_delete_active_heuristic_bypassed_with_force() {
+        let _guard = ENV_LOCK.lock().unwrap();
         let cctx_tmp = tempfile::TempDir::new().unwrap();
         let claude_tmp = tempfile::TempDir::new().unwrap();
 
